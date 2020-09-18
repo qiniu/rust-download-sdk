@@ -6,7 +6,10 @@ use rand::{seq::SliceRandom, thread_rng};
 use reqwest::blocking::Client as HTTPClient;
 use std::{
     fs::OpenOptions,
-    io::{copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Result as IOResult},
+    io::{
+        copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Result as IOResult,
+        Write,
+    },
     path::Path,
     result::Result,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
@@ -95,7 +98,7 @@ impl ReadAt for RangeReader {
                 .send()
                 .and_then(|resp| {
                     let code = resp.status();
-                    if code != 206 {
+                    if code != 206 && code != 200 {
                         return Ok(0);
                     }
                     let bytes = resp.bytes()?;
@@ -118,7 +121,7 @@ impl ReadAt for RangeReader {
 
 impl RangeReader {
     pub fn read_multi_range(&self, buf: &mut [u8], range: &[(u64, u64)]) -> IOResult<usize> {
-        let range = format!("bytes={}", generate_range_header(range));
+        let range_header_value = format!("bytes={}", generate_range_header(range));
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
 
@@ -127,34 +130,46 @@ impl RangeReader {
 
             let result = HTTP_CLIENT
                 .get(url)
-                .header("Range", &range)
+                .header("Range", &range_header_value)
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    let code = resp.status();
-                    if code != 206 {
-                        return Ok(0);
-                    }
-                    let boundary = {
-                        let content_type = resp
-                            .headers()
-                            .get("Content-Type")
-                            .expect("Content-Type must be existed");
-                        extract_boundary(
-                            &content_type
-                                .to_str()
-                                .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
-                        )
-                        .expect("Boundary must be existed in Content-Type")
-                        .to_owned()
-                    };
-
                     let mut copy_error: Option<IOError> = None;
-                    Multipart::with_body(&mut resp, boundary).foreach_entry(|mut field| {
-                        if let Err(err) = io_copy(&mut field.data, &mut cursor) {
-                            copy_error = Some(err);
+                    let code = resp.status();
+
+                    if code == 200 {
+                        let body = resp
+                            .bytes()
+                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
+                        for &(from, len) in range.iter() {
+                            let from = from as usize;
+                            let len = len as usize;
+                            cursor.write_all(&body.slice(from..(from + len)))?
                         }
-                    })?;
+                    } else {
+                        if code != 206 {
+                            return Ok(0);
+                        }
+                        let boundary = {
+                            let content_type = resp
+                                .headers()
+                                .get("Content-Type")
+                                .expect("Content-Type must be existed");
+                            extract_boundary(
+                                &content_type
+                                    .to_str()
+                                    .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
+                            )
+                            .expect("Boundary must be existed in Content-Type")
+                            .to_owned()
+                        };
+
+                        Multipart::with_body(&mut resp, boundary).foreach_entry(|mut field| {
+                            if let Err(err) = io_copy(&mut field.data, &mut cursor) {
+                                copy_error = Some(err);
+                            }
+                        })?;
+                    }
                     copy_error.map_or(Ok(cursor.position() as usize), Err)
                 });
             match result {
