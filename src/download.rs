@@ -3,7 +3,7 @@ use multipart::server::Multipart;
 use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
-use reqwest::blocking::Client as HTTPClient;
+use reqwest::{blocking::Client as HTTPClient, StatusCode};
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
@@ -99,8 +99,11 @@ impl ReadAt for RangeReader {
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
                     let code = resp.status();
-                    if code != 206 && code != 200 {
-                        return Ok(0);
+                    if code != StatusCode::PARTIAL_CONTENT && code != StatusCode::OK {
+                        return Err(IOError::new(
+                            IOErrorKind::Other,
+                            "Status code is neither 200 nor 206",
+                        ));
                     }
                     io_copy(&mut resp.take(size), &mut cursor)
                 });
@@ -120,7 +123,6 @@ impl ReadAt for RangeReader {
 impl RangeReader {
     pub fn read_multi_range(&self, buf: &mut [u8], range: &[(u64, u64)]) -> IOResult<usize> {
         let range_header_value = format!("bytes={}", generate_range_header(range));
-        let size = buf.len();
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
 
@@ -133,39 +135,46 @@ impl RangeReader {
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    let code = resp.status();
-
-                    if code == 200 {
-                        let body = resp
-                            .bytes()
-                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
-                        for &(from, len) in range.iter() {
-                            let from = from as usize;
-                            let len = len as usize;
-                            cursor.write_all(&body.slice(from..(from + len))).ok();
+                    match resp.status() {
+                        StatusCode::OK => {
+                            let body = resp
+                                .bytes()
+                                .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
+                            for &(from, len) in range.iter() {
+                                let from = from as usize;
+                                let len = len as usize;
+                                cursor.write_all(&body.slice(from..(from + len))).ok();
+                            }
                         }
-                    } else {
-                        if code != 206 {
-                            return Ok(0);
-                        }
-                        let boundary = {
-                            let content_type = resp
-                                .headers()
-                                .get("Content-Type")
-                                .expect("Content-Type must be existed");
-                            extract_boundary(
-                                &content_type
-                                    .to_str()
-                                    .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
-                            )
-                            .expect("Boundary must be existed in Content-Type")
-                            .to_owned()
-                        };
+                        StatusCode::PARTIAL_CONTENT => {
+                            let boundary = {
+                                let content_type = resp
+                                    .headers()
+                                    .get("Content-Type")
+                                    .expect("Content-Type must be existed");
+                                extract_boundary(
+                                    &content_type
+                                        .to_str()
+                                        .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
+                                )
+                                .expect("Boundary must be existed in Content-Type")
+                                .to_owned()
+                            };
 
-                        Multipart::with_body(&mut resp, boundary).foreach_entry(|mut field| {
-                            io_copy(&mut field.data, &mut cursor).ok();
-                        })?;
+                            Multipart::with_body(&mut resp, boundary).foreach_entry(
+                                |mut field| {
+                                    io_copy(&mut field.data, &mut cursor).ok();
+                                },
+                            )?;
+                        }
+                        _ => {
+                            return Err(IOError::new(
+                                IOErrorKind::Other,
+                                "Status code is neither 200 nor 206",
+                            ));
+                        }
                     }
+
                     Ok(cursor.position() as usize)
                 });
             match result {
@@ -209,7 +218,7 @@ impl RangeReader {
             let result = HTTP_CLIENT
                 .head(url)
                 .send()
-                .map(|resp| resp.status() == 200)
+                .map(|resp| resp.status() == StatusCode::OK)
                 .map_err(|err| IOError::new(IOErrorKind::Other, err));
             match result {
                 Ok(ok) => {
@@ -231,8 +240,8 @@ impl RangeReader {
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    if resp.status() != 200 {
-                        return Err(IOError::new(IOErrorKind::Other, "Status Code is not 200"));
+                    if resp.status() != StatusCode::OK {
+                        return Err(IOError::new(IOErrorKind::Other, "Status code is not 200"));
                     }
                     let content_length: Option<u64> = resp
                         .headers()
