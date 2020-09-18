@@ -5,12 +5,10 @@ use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::blocking::Client as HTTPClient;
 use std::{
-    fs::OpenOptions,
     io::{
-        copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Result as IOResult,
-        Write,
+        copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
+        Result as IOResult, Seek, SeekFrom, Write,
     },
-    path::Path,
     result::Result,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -89,26 +87,26 @@ impl RangeReader {
 impl ReadAt for RangeReader {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> IOResult<usize> {
         let size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
         let range = format!("bytes={}-{}", pos, pos + size - 1);
         let mut io_error: Option<IOError> = None;
         for url in self.choose_urls() {
+            cursor.set_position(0);
             let result = HTTP_CLIENT
                 .get(url)
                 .header("Range", &range)
                 .send()
+                .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
                     let code = resp.status();
                     if code != 206 && code != 200 {
                         return Ok(0);
                     }
-                    let bytes = resp.bytes()?;
-                    buf.copy_from_slice(&bytes);
-                    Ok(bytes.len())
-                })
-                .map_err(|err| IOError::new(IOErrorKind::Other, err));
+                    io_copy(&mut resp.take(size), &mut cursor)
+                });
             match result {
                 Ok(size) => {
-                    return Ok(size);
+                    return Ok(size as usize);
                 }
                 Err(err) => {
                     io_error = Some(err);
@@ -122,6 +120,7 @@ impl ReadAt for RangeReader {
 impl RangeReader {
     pub fn read_multi_range(&self, buf: &mut [u8], range: &[(u64, u64)]) -> IOResult<usize> {
         let range_header_value = format!("bytes={}", generate_range_header(range));
+        let size = buf.len();
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
 
@@ -134,7 +133,6 @@ impl RangeReader {
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    let mut copy_error: Option<IOError> = None;
                     let code = resp.status();
 
                     if code == 200 {
@@ -144,7 +142,7 @@ impl RangeReader {
                         for &(from, len) in range.iter() {
                             let from = from as usize;
                             let len = len as usize;
-                            cursor.write_all(&body.slice(from..(from + len)))?
+                            cursor.write_all(&body.slice(from..(from + len))).ok();
                         }
                     } else {
                         if code != 206 {
@@ -165,12 +163,10 @@ impl RangeReader {
                         };
 
                         Multipart::with_body(&mut resp, boundary).foreach_entry(|mut field| {
-                            if let Err(err) = io_copy(&mut field.data, &mut cursor) {
-                                copy_error = Some(err);
-                            }
+                            io_copy(&mut field.data, &mut cursor).ok();
                         })?;
                     }
-                    copy_error.map_or(Ok(cursor.position() as usize), Err)
+                    Ok(cursor.position() as usize)
                 });
             match result {
                 Ok(size) => {
@@ -227,7 +223,7 @@ impl RangeReader {
         return Err(io_error.unwrap());
     }
 
-    pub fn download_to(&self, path: &Path) -> IOResult<u64> {
+    pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
         for url in self.choose_urls() {
             let result = HTTP_CLIENT
@@ -243,13 +239,9 @@ impl RangeReader {
                         .get("Content-Length")
                         .and_then(|length| length.to_str().ok())
                         .and_then(|length| length.parse().ok());
-                    let mut file = OpenOptions::new()
-                        .create_new(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(path)?;
+                    writer.seek(SeekFrom::Start(0))?;
                     let copied = resp
-                        .copy_to(&mut file)
+                        .copy_to(writer)
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                     if let Some(content_length) = content_length {
                         if copied != content_length {
@@ -277,7 +269,7 @@ impl RangeReader {
             .map(|s| s.as_str())
             .collect();
         if urls.len() < self.tries {
-            let still_needed: usize = self.tries - urls.len();
+            let still_needed = self.tries - urls.len();
             for i in 0..still_needed {
                 let index = i % self.urls.len();
                 urls.push(urls[index]);
@@ -286,6 +278,9 @@ impl RangeReader {
         urls
     }
 }
+
+pub trait WriteSeek: Write + Seek {}
+impl<T: Write + Seek> WriteSeek for T {}
 
 #[cfg(test)]
 mod tests {
