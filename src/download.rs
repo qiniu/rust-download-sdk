@@ -3,11 +3,15 @@ use multipart::server::Multipart;
 use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
-use reqwest::{blocking::Client as HTTPClient, StatusCode};
+use reqwest::{
+    blocking::Client as HTTPClient,
+    header::{CONTENT_LENGTH, CONTENT_TYPE},
+    StatusCode,
+};
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
-        Result as IOResult, Seek, SeekFrom, Write,
+        Result as IOResult, Seek, Write,
     },
     result::Result,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
@@ -150,7 +154,7 @@ impl RangeReader {
                             let boundary = {
                                 let content_type = resp
                                     .headers()
-                                    .get("Content-Type")
+                                    .get(CONTENT_TYPE)
                                     .expect("Content-Type must be existed");
                                 extract_boundary(
                                     &content_type
@@ -213,16 +217,31 @@ impl RangeReader {
     }
 
     pub fn exist(&self) -> IOResult<bool> {
+        self.file_size().map(|_| true)
+    }
+
+    pub fn file_size(&self) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
         for url in self.choose_urls() {
             let result = HTTP_CLIENT
                 .head(url)
                 .send()
-                .map(|resp| resp.status() == StatusCode::OK)
-                .map_err(|err| IOError::new(IOErrorKind::Other, err));
+                .map_err(|err| IOError::new(IOErrorKind::Other, err))
+                .and_then(|resp| {
+                    if resp.status() == StatusCode::OK {
+                        Ok(resp
+                            .headers()
+                            .get(CONTENT_LENGTH)
+                            .and_then(|length| length.to_str().ok())
+                            .and_then(|length| length.parse().ok())
+                            .expect("Content-Length must be existed"))
+                    } else {
+                        Err(IOError::new(IOErrorKind::Other, "Status code is not 200"))
+                    }
+                });
             match result {
-                Ok(ok) => {
-                    return Ok(ok);
+                Ok(size) => {
+                    return Ok(size);
                 }
                 Err(err) => {
                     io_error = Some(err);
@@ -234,28 +253,31 @@ impl RangeReader {
 
     pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
+        let file_size = self.file_size()?;
+        let mut have_read = 0;
         for url in self.choose_urls() {
-            let result = HTTP_CLIENT
-                .get(url)
+            let mut req = HTTP_CLIENT.get(url);
+            if have_read > 0 {
+                req = req.header("Range", format!("bytes={}-", have_read));
+            }
+            let result = req
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    if resp.status() != StatusCode::OK {
-                        return Err(IOError::new(IOErrorKind::Other, "Status code is not 200"));
+                    if resp.status() != StatusCode::OK
+                        || resp.status() != StatusCode::PARTIAL_CONTENT
+                    {
+                        return Err(IOError::new(
+                            IOErrorKind::Other,
+                            "Status code is neither 200 nor 206",
+                        ));
                     }
-                    let content_length: Option<u64> = resp
-                        .headers()
-                        .get("Content-Length")
-                        .and_then(|length| length.to_str().ok())
-                        .and_then(|length| length.parse().ok());
-                    writer.seek(SeekFrom::Start(0))?;
                     let copied = resp
                         .copy_to(writer)
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
-                    if let Some(content_length) = content_length {
-                        if copied != content_length {
-                            return Err(IOError::from(IOErrorKind::UnexpectedEof));
-                        }
+                    if copied != file_size - have_read {
+                        have_read += copied;
+                        return Err(IOError::from(IOErrorKind::UnexpectedEof));
                     }
                     Ok(copied)
                 });
@@ -296,7 +318,6 @@ mod tests {
     use super::*;
     use futures::channel::oneshot::channel;
     use multipart::client::lazy::Multipart;
-    use reqwest::header::CONTENT_TYPE;
     use std::{
         boxed::Box,
         error::Error,
@@ -325,6 +346,24 @@ mod tests {
             tx.send(()).ok();
             handler.await.ok();
         }};
+    }
+
+    #[tokio::test]
+    async fn test_download_file() -> Result<(), Box<dyn Error>> {
+        let routes = { path!("file").map(|| Response::new("1234567890".into())) };
+        starts_with_server!(addr, routes, {
+            let url = format!("http://{}/file", addr);
+            let downloader = Arc::new(RangeReader::new(&[url.to_owned()], 3));
+            assert_eq!(
+                {
+                    let downloader = downloader.to_owned();
+                    spawn_blocking(move || downloader.exist()).await??
+                },
+                true
+            );
+            assert_eq!(spawn_blocking(move || downloader.file_size()).await??, 10);
+        });
+        Ok(())
     }
 
     #[tokio::test]
