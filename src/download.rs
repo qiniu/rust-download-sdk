@@ -145,8 +145,8 @@ impl RangeReader {
                                 .bytes()
                                 .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                             for &(from, len) in range.iter() {
-                                let from = from as usize;
-                                let len = len as usize;
+                                let from = (from as usize).min(body.len());
+                                let len = (len as usize).min(body.len() - from);
                                 cursor.write_all(&body.slice(from..(from + len))).ok();
                             }
                         }
