@@ -4,7 +4,7 @@ use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
 use reqwest::{
-    blocking::Client as HTTPClient,
+    blocking::{Client as HTTPClient, Response as HTTPResponse},
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     StatusCode,
 };
@@ -92,10 +92,13 @@ impl ReadAt for RangeReader {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> IOResult<usize> {
         let size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
-        let range = format!("bytes={}-{}", pos, pos + size - 1);
         let mut io_error: Option<IOError> = None;
         for url in self.choose_urls() {
-            cursor.set_position(0);
+            let range = format!(
+                "bytes={}-{}",
+                (pos + cursor.position()).min(pos + size - 1),
+                pos + size - 1
+            );
             let result = HTTP_CLIENT
                 .get(url)
                 .header("Range", &range)
@@ -109,7 +112,17 @@ impl ReadAt for RangeReader {
                             "Status code is neither 200 nor 206",
                         ));
                     }
-                    io_copy(&mut resp.take(size), &mut cursor)
+                    let content_length = parse_content_length(&resp);
+                    match io_copy(&mut resp.take(content_length), &mut cursor) {
+                        Ok(have_read) => {
+                            if have_read < content_length {
+                                Err(IOError::from(IOErrorKind::UnexpectedEof))
+                            } else {
+                                Ok(cursor.position())
+                            }
+                        }
+                        Err(err) => Err(err),
+                    }
                 });
             match result {
                 Ok(size) => {
@@ -229,12 +242,7 @@ impl RangeReader {
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
                     if resp.status() == StatusCode::OK {
-                        Ok(resp
-                            .headers()
-                            .get(CONTENT_LENGTH)
-                            .and_then(|length| length.to_str().ok())
-                            .and_then(|length| length.parse().ok())
-                            .expect("Content-Length must be existed"))
+                        Ok(parse_content_length(&resp))
                     } else {
                         Err(IOError::new(IOErrorKind::Other, "Status code is not 200"))
                     }
@@ -253,7 +261,6 @@ impl RangeReader {
 
     pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
-        let file_size = self.file_size()?;
         let mut have_read = 0;
         for url in self.choose_urls() {
             let mut req = HTTP_CLIENT.get(url);
@@ -272,14 +279,15 @@ impl RangeReader {
                             "Status code is neither 200 nor 206",
                         ));
                     }
+                    let content_type = parse_content_length(&resp);
                     let copied = resp
                         .copy_to(writer)
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
-                    if copied != file_size - have_read {
-                        have_read += copied;
+                    have_read += copied;
+                    if copied != content_type {
                         return Err(IOError::from(IOErrorKind::UnexpectedEof));
                     }
-                    Ok(copied)
+                    Ok(have_read)
                 });
             match result {
                 Ok(downloaded) => {
@@ -312,6 +320,14 @@ impl RangeReader {
 
 pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
+
+fn parse_content_length(resp: &HTTPResponse) -> u64 {
+    resp.headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|length| length.to_str().ok())
+        .and_then(|length| length.parse().ok())
+        .expect("Content-Length must be existed")
+}
 
 #[cfg(test)]
 mod tests {
@@ -374,8 +390,8 @@ mod tests {
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     let mut response_body = Multipart::new();
-                    response_body.add_text("0-4", "12345");
-                    response_body.add_text("5-9", "67890");
+                    response_body.add_text("", "12345");
+                    response_body.add_text("", "67890");
                     let mut fields = response_body.prepare().unwrap();
                     let mut buffer = Vec::new();
                     fields.read_to_end(&mut buffer).unwrap();
@@ -388,6 +404,36 @@ mod tests {
                             .unwrap(),
                     );
                     response
+                })
+        };
+        starts_with_server!(addr, routes, {
+            let url = format!("http://{}/file", addr);
+            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let buf = Arc::new(Mutex::new([0; 10]));
+            let ranges = [(0, 5), (5, 5)];
+            assert_eq!(
+                {
+                    let buf = buf.to_owned();
+                    spawn_blocking(move || {
+                        range_reader.read_multi_range(&mut *buf.lock().unwrap(), &ranges)
+                    })
+                    .await??
+                },
+                10
+            );
+            assert_eq!(&*buf.lock().unwrap(), b"1234567890");
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_range_2() -> Result<(), Box<dyn Error>> {
+        let routes = {
+            path!("file")
+                .and(header::value("Range"))
+                .map(move |range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
+                    "12345678901357924680"
                 })
         };
         starts_with_server!(addr, routes, {
