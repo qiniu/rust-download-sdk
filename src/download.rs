@@ -11,7 +11,7 @@ use reqwest::{
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
-        Result as IOResult, Seek, Write,
+        Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
@@ -91,14 +91,13 @@ impl RangeReader {
 impl ReadAt for RangeReader {
     fn read_at(&self, pos: u64, buf: &mut [u8]) -> IOResult<usize> {
         let size = buf.len() as u64;
+        if size == 0 {
+            return Ok(0);
+        }
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
+        let range = format!("bytes={}-{}", pos, pos + size - 1);
         for url in self.choose_urls() {
-            let range = format!(
-                "bytes={}-{}",
-                (pos + cursor.position()).min(pos + size - 1),
-                pos + size - 1
-            );
             let result = HTTP_CLIENT
                 .get(url)
                 .header("Range", &range)
@@ -113,22 +112,14 @@ impl ReadAt for RangeReader {
                         ));
                     }
                     let content_length = parse_content_length(&resp);
-                    match io_copy(&mut resp.take(content_length), &mut cursor) {
-                        Ok(have_read) => {
-                            if have_read < content_length {
-                                Err(IOError::from(IOErrorKind::UnexpectedEof))
-                            } else {
-                                Ok(cursor.position())
-                            }
-                        }
-                        Err(err) => Err(err),
-                    }
+                    io_copy(&mut resp.take(content_length), &mut cursor)
                 });
             match result {
                 Ok(size) => {
                     return Ok(size as usize);
                 }
                 Err(err) => {
+                    cursor.set_position(0);
                     io_error = Some(err);
                 }
             }
@@ -144,8 +135,6 @@ impl RangeReader {
         let mut io_error: Option<IOError> = None;
 
         for url in self.choose_urls() {
-            cursor.set_position(0);
-
             let result = HTTP_CLIENT
                 .get(url)
                 .header("Range", &range_header_value)
@@ -199,6 +188,7 @@ impl RangeReader {
                     return Ok(size);
                 }
                 Err(err) => {
+                    cursor.set_position(0);
                     io_error = Some(err);
                 }
             }
@@ -261,39 +251,30 @@ impl RangeReader {
 
     pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
-        let mut have_read = 0;
+        let original_position = writer.seek(SeekFrom::Current(0))?;
         for url in self.choose_urls() {
-            let mut req = HTTP_CLIENT.get(url);
-            if have_read > 0 {
-                req = req.header("Range", format!("bytes={}-", have_read));
-            }
+            let req = HTTP_CLIENT.get(url);
             let result = req
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
                     if resp.status() != StatusCode::OK
-                        || resp.status() != StatusCode::PARTIAL_CONTENT
+                        && resp.status() != StatusCode::PARTIAL_CONTENT
                     {
                         return Err(IOError::new(
                             IOErrorKind::Other,
                             "Status code is neither 200 nor 206",
                         ));
                     }
-                    let content_type = parse_content_length(&resp);
-                    let copied = resp
-                        .copy_to(writer)
-                        .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
-                    have_read += copied;
-                    if copied != content_type {
-                        return Err(IOError::from(IOErrorKind::UnexpectedEof));
-                    }
-                    Ok(have_read)
+                    resp.copy_to(writer)
+                        .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                 });
             match result {
                 Ok(downloaded) => {
                     return Ok(downloaded);
                 }
                 Err(err) => {
+                    writer.seek(SeekFrom::Start(original_position))?;
                     io_error = Some(err);
                 }
             }
@@ -339,7 +320,10 @@ mod tests {
         error::Error,
         io::Read,
         result::Result,
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering::Relaxed},
+            Arc,
+        },
     };
     use tokio::task::{spawn, spawn_blocking};
     use warp::{
@@ -369,15 +353,43 @@ mod tests {
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
             let url = format!("http://{}/file", addr);
-            let downloader = Arc::new(RangeReader::new(&[url.to_owned()], 3));
-            assert_eq!(
-                {
-                    let downloader = downloader.to_owned();
-                    spawn_blocking(move || downloader.exist()).await??
-                },
-                true
-            );
-            assert_eq!(spawn_blocking(move || downloader.file_size()).await??, 10);
+            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            spawn_blocking(move || {
+                assert!(downloader.exist().unwrap());
+                assert_eq!(downloader.file_size().unwrap(), 10);
+                let mut buf = Cursor::new(Vec::new());
+                assert_eq!(downloader.download_to(&mut buf).unwrap(), 10);
+                assert_eq!(&buf.into_inner(), b"1234567890");
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_file_2() -> Result<(), Box<dyn Error>> {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let routes = {
+            let counter = counter.to_owned();
+            path!("file").map(move || {
+                counter.fetch_add(1, Relaxed);
+                let mut resp = Response::new("12345".into());
+                *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
+                resp
+            })
+        };
+        starts_with_server!(addr, routes, {
+            let url = format!("http://{}/file", addr);
+            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            spawn_blocking(move || {
+                downloader.exist().unwrap_err();
+                downloader.file_size().unwrap_err();
+                downloader
+                    .download_to(&mut Cursor::new(Vec::new()))
+                    .unwrap_err();
+                assert_eq!(counter.load(Relaxed), 3 * 3);
+            })
+            .await?;
         });
         Ok(())
     }
@@ -409,19 +421,16 @@ mod tests {
         starts_with_server!(addr, routes, {
             let url = format!("http://{}/file", addr);
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
-            let buf = Arc::new(Mutex::new([0; 10]));
             let ranges = [(0, 5), (5, 5)];
-            assert_eq!(
-                {
-                    let buf = buf.to_owned();
-                    spawn_blocking(move || {
-                        range_reader.read_multi_range(&mut *buf.lock().unwrap(), &ranges)
-                    })
-                    .await??
-                },
-                10
-            );
-            assert_eq!(&*buf.lock().unwrap(), b"1234567890");
+            spawn_blocking(move || {
+                let mut buf = [0; 10];
+                assert_eq!(
+                    range_reader.read_multi_range(&mut buf, &ranges).unwrap(),
+                    10
+                );
+                assert_eq!(&buf, b"1234567890");
+            })
+            .await?;
         });
         Ok(())
     }
@@ -439,19 +448,46 @@ mod tests {
         starts_with_server!(addr, routes, {
             let url = format!("http://{}/file", addr);
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
-            let buf = Arc::new(Mutex::new([0; 10]));
             let ranges = [(0, 5), (5, 5)];
-            assert_eq!(
-                {
-                    let buf = buf.to_owned();
-                    spawn_blocking(move || {
-                        range_reader.read_multi_range(&mut *buf.lock().unwrap(), &ranges)
-                    })
-                    .await??
-                },
-                10
-            );
-            assert_eq!(&*buf.lock().unwrap(), b"1234567890");
+            spawn_blocking(move || {
+                let mut buf = [0; 10];
+                assert_eq!(
+                    range_reader.read_multi_range(&mut buf, &ranges).unwrap(),
+                    10
+                );
+                assert_eq!(&buf, b"1234567890");
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_range_3() -> Result<(), Box<dyn Error>> {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let routes = {
+            let counter = counter.to_owned();
+            path!("file")
+                .and(header::value("Range"))
+                .map(move |range: HeaderValue| {
+                    counter.fetch_add(1, Relaxed);
+                    assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
+                    let mut resp = Response::new("12345".into());
+                    *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
+                    resp
+                })
+        };
+        starts_with_server!(addr, routes, {
+            let url = format!("http://{}/file", addr);
+            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let ranges = [(0, 5), (5, 5)];
+            spawn_blocking(move || {
+                range_reader
+                    .read_multi_range(&mut Vec::<u8>::new(), &ranges)
+                    .unwrap_err();
+                assert_eq!(counter.load(Relaxed), 3);
+            })
+            .await?;
         });
         Ok(())
     }
