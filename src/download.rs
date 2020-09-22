@@ -256,6 +256,12 @@ impl RangeReader {
         return Err(io_error.unwrap());
     }
 
+    pub fn download(&self) -> IOResult<Vec<u8>> {
+        let mut bytes = Cursor::new(Vec::new());
+        self.download_to(&mut bytes, None)?;
+        Ok(bytes.into_inner())
+    }
+
     pub fn download_to(&self, writer: &mut dyn WriteSeek, max_size: Option<u64>) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
         let original_position = writer.seek(SeekFrom::Current(0))?;
@@ -439,9 +445,7 @@ mod tests {
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
-                let mut buf = Cursor::new(Vec::new());
-                assert_eq!(downloader.download_to(&mut buf, None).unwrap(), 10);
-                assert_eq!(&buf.into_inner(), b"1234567890");
+                assert_eq!(&downloader.download().unwrap(), b"1234567890");
             })
             .await?;
         });
@@ -466,9 +470,7 @@ mod tests {
             spawn_blocking(move || {
                 downloader.exist().unwrap_err();
                 downloader.file_size().unwrap_err();
-                downloader
-                    .download_to(&mut Cursor::new(Vec::new()), None)
-                    .unwrap_err();
+                downloader.download().unwrap_err();
                 assert_eq!(counter.load(Relaxed), 3 * 3);
             })
             .await?;
