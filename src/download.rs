@@ -6,7 +6,7 @@ use rand::{seq::SliceRandom, thread_rng};
 use rayon::prelude::*;
 use reqwest::{
     blocking::{Client as HTTPClient, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_TYPE},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
     StatusCode,
 };
 use sema::Semaphore;
@@ -305,7 +305,7 @@ impl RangeReader {
 
     pub fn flash_download_to(
         &self,
-        writer: &mut (dyn WriteSeek+Send),
+        writer: &mut (dyn WriteSeek + Send),
         max_size: Option<u64>,
         part_size: u64,
         concurrency: Option<usize>,
@@ -370,6 +370,39 @@ impl RangeReader {
         }
     }
 
+    pub fn download_last_bytes(&self, buf: &mut [u8]) -> IOResult<u64> {
+        let size = buf.len() as u64;
+        let mut cursor = Cursor::new(buf);
+        let mut io_error: Option<IOError> = None;
+        let range = format!("bytes=-{}", size);
+        for url in self.choose_urls() {
+            let result = HTTP_CLIENT
+                .get(url)
+                .header("Range", &range)
+                .send()
+                .map_err(|err| IOError::new(IOErrorKind::Other, err))
+                .and_then(|resp| {
+                    let code = resp.status();
+                    if code != StatusCode::PARTIAL_CONTENT {
+                        return Err(IOError::new(IOErrorKind::Other, "Status code is not 206"));
+                    }
+                    let total_size = parse_total_size_from_content_range(&resp);
+                    io_copy(&mut resp.take(size), &mut cursor)?;
+                    Ok(total_size)
+                });
+            match result {
+                Ok(total_size) => {
+                    return Ok(total_size);
+                }
+                Err(err) => {
+                    cursor.set_position(0);
+                    io_error = Some(err);
+                }
+            }
+        }
+        Err(io_error.unwrap())
+    }
+
     fn choose_urls(&self) -> Vec<&str> {
         let mut urls: Vec<&str> = self
             .urls
@@ -396,6 +429,15 @@ fn parse_content_length(resp: &HTTPResponse) -> u64 {
         .and_then(|length| length.to_str().ok())
         .and_then(|length| length.parse().ok())
         .expect("Content-Length must be existed")
+}
+
+fn parse_total_size_from_content_range(resp: &HTTPResponse) -> u64 {
+    resp.headers()
+        .get(CONTENT_RANGE)
+        .and_then(|line| line.to_str().ok())
+        .and_then(|line| line.split("/").nth(1))
+        .and_then(|length| length.parse().ok())
+        .expect("Content-Range cannot be parsed")
 }
 
 #[cfg(test)]
@@ -502,6 +544,35 @@ mod tests {
                 assert_eq!(counter.load(Relaxed), 3);
             })
             .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_last_bytes() -> Result<(), Box<dyn Error>> {
+        let routes = path!("file")
+            .and(header::value("Range"))
+            .map(|range: HeaderValue| {
+                assert_eq!(range.to_str().unwrap(), "bytes=-10");
+                let mut resp = Response::new("1234567890".into());
+                *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+                resp.headers_mut().insert(
+                    CONTENT_RANGE,
+                    "bytes 157286390-157286399/157286400".parse().unwrap(),
+                );
+                resp
+            });
+        starts_with_server!(addr, routes, {
+            {
+                let url = format!("http://{}/file", addr);
+                let downloader = RangeReader::new(&[url.to_owned()], 3);
+                spawn_blocking(move || {
+                    let mut buf = [0u8; 10];
+                    assert_eq!(downloader.download_last_bytes(&mut buf).unwrap(), 157286400);
+                    assert_eq!(&buf, b"1234567890");
+                })
+                .await?;
+            }
         });
         Ok(())
     }
