@@ -370,7 +370,7 @@ impl RangeReader {
         }
     }
 
-    pub fn download_last_bytes(&self, buf: &mut [u8]) -> IOResult<u64> {
+    pub fn read_last_bytes(&self, buf: &mut [u8]) -> IOResult<(u64, u64)> {
         let size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
@@ -387,12 +387,12 @@ impl RangeReader {
                         return Err(IOError::new(IOErrorKind::Other, "Status code is not 206"));
                     }
                     let total_size = parse_total_size_from_content_range(&resp);
-                    io_copy(&mut resp.take(size), &mut cursor)?;
-                    Ok(total_size)
+                    let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
+                    Ok((actual_size, total_size))
                 });
             match result {
-                Ok(total_size) => {
-                    return Ok(total_size);
+                Ok((actual_size, total_size)) => {
+                    return Ok((actual_size, total_size));
                 }
                 Err(err) => {
                     cursor.set_position(0);
@@ -549,7 +549,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_last_bytes() -> Result<(), Box<dyn Error>> {
+    async fn test_read_last_bytes() -> Result<(), Box<dyn Error>> {
         let routes = path!("file")
             .and(header::value("Range"))
             .map(|range: HeaderValue| {
@@ -568,7 +568,10 @@ mod tests {
                 let downloader = RangeReader::new(&[url.to_owned()], 3);
                 spawn_blocking(move || {
                     let mut buf = [0u8; 10];
-                    assert_eq!(downloader.download_last_bytes(&mut buf).unwrap(), 157286400);
+                    assert_eq!(
+                        downloader.read_last_bytes(&mut buf).unwrap(),
+                        (10, 157286400)
+                    );
                     assert_eq!(&buf, b"1234567890");
                 })
                 .await?;
