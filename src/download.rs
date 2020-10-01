@@ -3,17 +3,20 @@ use multipart::server::Multipart;
 use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
+use rayon::prelude::*;
 use reqwest::{
     blocking::{Client as HTTPClient, Response as HTTPResponse},
     header::{CONTENT_LENGTH, CONTENT_TYPE},
     StatusCode,
 };
+use sema::Semaphore;
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
         Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
+    sync::Mutex,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use url::Url;
@@ -298,6 +301,73 @@ impl RangeReader {
             }
         }
         return Err(io_error.unwrap());
+    }
+
+    pub fn flash_download_to(
+        &self,
+        writer: &mut (dyn WriteSeek+Send),
+        max_size: Option<u64>,
+        part_size: u64,
+        concurrency: Option<usize>,
+    ) -> IOResult<u64> {
+        let total_size = {
+            let file_size = self.file_size()?;
+            if let Some(max_size) = max_size {
+                file_size.min(max_size)
+            } else {
+                file_size
+            }
+        };
+        let writer = Mutex::new(writer);
+        let semaphore = {
+            #[cfg(target_os = "linux")]
+            {
+                concurrency.map(Semaphore::new)
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                concurrency.map(|c| Semaphore::new(c as u32))
+            }
+        };
+        let downloaded = split_parts(part_size, total_size)
+            .into_par_iter()
+            .map(|(from, to)| {
+                let buf = {
+                    let _guard = semaphore.as_ref().take();
+                    let size = to - from;
+                    let mut buf = vec![0; size as usize];
+                    let have_read = self.read_at(from, &mut buf)?;
+                    if have_read as u64 != size {
+                        return Err(IOError::new(
+                            IOErrorKind::Other,
+                            format!(
+                                "Read from {}-{}, Expected got {} bytes, actually got {} bytes",
+                                from, to, size, have_read
+                            ),
+                        ));
+                    }
+                    buf
+                };
+                let mut w = writer.lock().unwrap();
+                w.seek(SeekFrom::Start(from))?;
+                w.write_all(&buf)?;
+                Ok(to - from)
+            })
+            .collect::<IOResult<Vec<u64>>>()?
+            .iter()
+            .fold(0, |sum, have_read| sum + have_read);
+        return Ok(downloaded);
+
+        fn split_parts(part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
+            let mut parts = Vec::new();
+            let mut start = 0;
+            while start < total_size {
+                let new_start = (start + part_size).min(total_size);
+                parts.push((start, new_start));
+                start = new_start;
+            }
+            parts
+        }
     }
 
     fn choose_urls(&self) -> Vec<&str> {

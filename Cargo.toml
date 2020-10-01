@@ -20,8 +20,12 @@ once_cell = "1.4.1"
 positioned-io = "0.2.2"
 rand = "0.7.3"
 multipart = { version = "0.17.1", package = "qiniu-multipart" }
+rayon = "1.4.1"
+sema = "0.1.4"
 
 [dev-dependencies]
 futures = "0.3.5"
 warp = "0.2.5"
 tokio = { version = "0.2.22", features = ["rt-core", "blocking", "macros"] }
+structopt = "0.3.18"
+anyhow = "1.0.32"
