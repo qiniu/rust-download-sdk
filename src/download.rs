@@ -324,7 +324,6 @@ impl RangeReader {
                 file_size
             }
         };
-        let start_from = writer.seek(SeekFrom::End(0))?;
         let writer = Mutex::new(writer);
         let semaphore = {
             #[cfg(target_os = "linux")]
@@ -336,7 +335,7 @@ impl RangeReader {
                 concurrency.map(|c| Semaphore::new(c as u32))
             }
         };
-        let downloaded = split_parts(start_from, part_size, total_size)
+        let downloaded = split_parts(part_size, total_size)
             .into_par_iter()
             .map(|(from, to)| {
                 let buf = {
@@ -366,9 +365,9 @@ impl RangeReader {
             .fold(0, |sum, have_read| sum + have_read);
         return Ok(downloaded);
 
-        fn split_parts(start_from: u64, part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
+        fn split_parts(part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
             let mut parts = Vec::new();
-            let mut start = start_from;
+            let mut start = 0;
             while start < total_size {
                 let new_start = (start + part_size).min(total_size);
                 parts.push((start, new_start));

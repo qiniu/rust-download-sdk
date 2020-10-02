@@ -26,7 +26,11 @@ fn main() -> Result<()> {
     let opt = Opt::from_args();
 
     let reader = RangeReader::new(&opt.urls, opt.tries);
-    let mut to_file = OpenOptions::new().write(true).create(true).open(&opt.to)?;
+    let mut to_file = OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&opt.to)?;
     reader.flash_download_to(&mut to_file, None, opt.part_size, opt.concurrency)?;
     Ok(())
 }
