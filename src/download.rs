@@ -6,7 +6,7 @@ use rand::{seq::SliceRandom, thread_rng};
 use rayon::prelude::*;
 use reqwest::{
     blocking::{Client as HTTPClient, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     StatusCode,
 };
 use sema::Semaphore;
@@ -267,14 +267,20 @@ impl RangeReader {
 
     pub fn download_to(&self, writer: &mut dyn WriteSeek, max_size: Option<u64>) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
-        let original_position = writer.seek(SeekFrom::Current(0))?;
+        let init_start_from = writer.seek(SeekFrom::End(0))?;
+        let mut start_from = init_start_from;
         for url in self.choose_urls() {
-            let req = HTTP_CLIENT.get(url);
+            let mut req = HTTP_CLIENT.get(url);
+            if start_from > 0 {
+                req = req.header(RANGE, format!("bytes={}-", start_from));
+            }
             let result = req
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
-                    if resp.status() != StatusCode::OK
+                    if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
+                        return Ok(0);
+                    } else if resp.status() != StatusCode::OK
                         && resp.status() != StatusCode::PARTIAL_CONTENT
                     {
                         return Err(IOError::new(
@@ -290,12 +296,12 @@ impl RangeReader {
                             .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                     }
                 });
+            start_from = writer.seek(SeekFrom::Current(0))?;
             match result {
-                Ok(downloaded) => {
-                    return Ok(downloaded);
+                Ok(_) => {
+                    return Ok(start_from - init_start_from);
                 }
                 Err(err) => {
-                    writer.seek(SeekFrom::Start(original_position))?;
                     io_error = Some(err);
                 }
             }
@@ -318,6 +324,7 @@ impl RangeReader {
                 file_size
             }
         };
+        let start_from = writer.seek(SeekFrom::End(0))?;
         let writer = Mutex::new(writer);
         let semaphore = {
             #[cfg(target_os = "linux")]
@@ -329,13 +336,14 @@ impl RangeReader {
                 concurrency.map(|c| Semaphore::new(c as u32))
             }
         };
-        let downloaded = split_parts(part_size, total_size)
+        let downloaded = split_parts(start_from, part_size, total_size)
             .into_par_iter()
             .map(|(from, to)| {
                 let buf = {
                     let _guard = semaphore.as_ref().take();
                     let size = to - from;
                     let mut buf = vec![0; size as usize];
+
                     let have_read = self.read_at(from, &mut buf)?;
                     if have_read as u64 != size {
                         return Err(IOError::new(
@@ -358,9 +366,9 @@ impl RangeReader {
             .fold(0, |sum, have_read| sum + have_read);
         return Ok(downloaded);
 
-        fn split_parts(part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
+        fn split_parts(start_from: u64, part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
             let mut parts = Vec::new();
-            let mut start = 0;
+            let mut start = start_from;
             while start < total_size {
                 let new_start = (start + part_size).min(total_size);
                 parts.push((start, new_start));
@@ -378,7 +386,7 @@ impl RangeReader {
         for url in self.choose_urls() {
             let result = HTTP_CLIENT
                 .get(url)
-                .header("Range", &range)
+                .header(RANGE, &range)
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
