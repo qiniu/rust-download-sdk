@@ -6,7 +6,7 @@ use rand::{seq::SliceRandom, thread_rng};
 use rayon::prelude::*;
 use reqwest::{
     blocking::{Client as HTTPClient, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE, USER_AGENT},
     StatusCode,
 };
 use sema::Semaphore;
@@ -20,6 +20,9 @@ use std::{
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use url::Url;
+
+static QINIU_USER_AGENT: Lazy<Box<str>> =
+    Lazy::new(|| format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION")).into());
 
 pub fn sign_download_url_with_deadline(
     c: &Credential,
@@ -103,7 +106,8 @@ impl ReadAt for RangeReader {
         for url in self.choose_urls() {
             let result = HTTP_CLIENT
                 .get(url)
-                .header("Range", &range)
+                .header(RANGE, &range)
+                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
@@ -142,7 +146,8 @@ impl RangeReader {
         for url in self.choose_urls() {
             let result = HTTP_CLIENT
                 .get(url)
-                .header("Range", &range_header_value)
+                .header(RANGE, &range_header_value)
+                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -275,6 +280,7 @@ impl RangeReader {
                 req = req.header(RANGE, format!("bytes={}-", start_from));
             }
             let result = req
+                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -386,6 +392,7 @@ impl RangeReader {
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range)
+                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
@@ -638,9 +645,9 @@ mod tests {
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
-                let mut buf = [0u8; 5];
+                let mut buf = Vec::new();
                 {
-                    let mut cursor = Cursor::new(&mut buf[..]);
+                    let mut cursor = Cursor::new(&mut buf);
                     assert_eq!(downloader.download_to(&mut cursor, Some(5)).unwrap(), 5);
                 }
                 assert_eq!(&buf, b"12345");
