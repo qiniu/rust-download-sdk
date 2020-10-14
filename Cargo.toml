@@ -1,8 +1,8 @@
 [package]
 name = "qiniu-download"
-version = "0.0.9"
+version = "0.0.10"
 description = "Qiniu Resource (Cloud) Download SDK for Rust."
-authors = ["Bachue Zhou <bachue.shu@gmail.com>"]
+authors = ["Bachue Zhou <zhourong@qiniu.com>", "longbai <baishunlong@qiniu.com>", "qiniusdk <sdk@qiniu.com>"]
 documentation = "http://developer.qiniu.com"
 readme = "README.md"
 edition = "2018"
