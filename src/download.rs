@@ -261,14 +261,6 @@ impl RangeReader {
                 .join(",")
         }
 
-        fn parse_range_header(range: &str) -> (u64, u64, u64) {
-            let from: u64;
-            let to: u64;
-            let total_size: u64;
-            scan!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
-            (from, to, total_size)
-        }
-
         fn extract_boundary<'s>(content_type: &'s str) -> Option<&'s str> {
             const BOUNDARY: &str = "boundary=";
             content_type.find(BOUNDARY).map(|idx| {
@@ -453,7 +445,12 @@ impl RangeReader {
                     if code != StatusCode::PARTIAL_CONTENT {
                         return Err(IOError::new(IOErrorKind::Other, "Status code is not 206"));
                     }
-                    let total_size = parse_total_size_from_content_range(&resp);
+                    let (_, _, total_size) = parse_range_header(
+                        resp.headers()
+                            .get(CONTENT_RANGE)
+                            .and_then(|r| r.to_str().ok())
+                            .expect("Content-Range must be existed"),
+                    );
                     let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
                     Ok((actual_size, total_size))
                 });
@@ -498,13 +495,12 @@ fn parse_content_length(resp: &HTTPResponse) -> u64 {
         .expect("Content-Length must be existed")
 }
 
-fn parse_total_size_from_content_range(resp: &HTTPResponse) -> u64 {
-    resp.headers()
-        .get(CONTENT_RANGE)
-        .and_then(|line| line.to_str().ok())
-        .and_then(|line| line.split("/").nth(1))
-        .and_then(|length| length.parse().ok())
-        .expect("Content-Range cannot be parsed")
+fn parse_range_header(range: &str) -> (u64, u64, u64) {
+    let from: u64;
+    let to: u64;
+    let total_size: u64;
+    scan!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
+    (from, to, total_size)
 }
 
 fn sleep_before_retry(tries: usize) {
