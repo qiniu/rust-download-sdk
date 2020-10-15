@@ -19,6 +19,7 @@ use std::{
     sync::Mutex,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
+use text_io::scan;
 use url::Url;
 
 static QINIU_USER_AGENT: Lazy<Box<str>> =
@@ -136,11 +137,15 @@ impl ReadAt for RangeReader {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct RangePart {
+    pub data: Vec<u8>,
+    pub range: (u64, u64),
+}
+
 impl RangeReader {
-    pub fn read_multi_range(&self, buf: &mut [u8], range: &[(u64, u64)]) -> IOResult<usize> {
+    pub fn read_multi_range(&self, range: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(range));
-        let buf_size = buf.len();
-        let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
 
         for url in self.choose_urls() {
@@ -151,6 +156,7 @@ impl RangeReader {
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
+                    let mut parts = Vec::with_capacity(range.len());
                     match resp.status() {
                         StatusCode::OK => {
                             let body = resp
@@ -158,35 +164,64 @@ impl RangeReader {
                                 .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                             for &(from, len) in range.iter() {
                                 let from = (from as usize).min(body.len());
-                                let len = (len as usize)
-                                    .min(body.len() - from)
-                                    .min(buf_size - cursor.position() as usize);
+                                let len = (len as usize).min(body.len() - from);
                                 if len > 0 {
-                                    cursor.write_all(&body.slice(from..(from + len)))?;
+                                    parts.push(RangePart {
+                                        data: body.slice(from..(from + len)).to_vec(),
+                                        range: (from as u64, len as u64),
+                                    });
                                 }
                             }
                         }
                         StatusCode::PARTIAL_CONTENT => {
-                            let boundary = {
-                                let content_type = resp
-                                    .headers()
-                                    .get(CONTENT_TYPE)
-                                    .expect("Content-Type must be existed");
-                                extract_boundary(
-                                    &content_type
-                                        .to_str()
-                                        .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
-                                )
-                                .expect("Boundary must be existed in Content-Type")
-                                .to_owned()
-                            };
+                            if range.len() > 1 {
+                                let boundary = {
+                                    let content_type = resp
+                                        .headers()
+                                        .get(CONTENT_TYPE)
+                                        .expect("Content-Type must be existed");
+                                    extract_boundary(
+                                        &content_type
+                                            .to_str()
+                                            .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
+                                    )
+                                    .expect("Boundary must be existed in Content-Type")
+                                    .to_owned()
+                                };
 
-                            Multipart::with_body(&mut resp, boundary).foreach_entry(|field| {
-                                let max_size = buf_size as u64 - cursor.position();
-                                if max_size > 0 {
-                                    io_copy(&mut field.data.take(max_size), &mut cursor).unwrap();
-                                }
-                            })?;
+                                Multipart::with_body(&mut resp, boundary).foreach_entry(
+                                    |mut field| {
+                                        let content_range = field
+                                            .headers
+                                            .content_range
+                                            .expect("Content-Range must be existed");
+                                        let (from, to, _) = parse_range_header(&content_range);
+                                        let len = to - from + 1;
+                                        let mut data = Vec::with_capacity(len as usize);
+                                        field.data.read_to_end(&mut data).unwrap();
+                                        parts.push(RangePart {
+                                            data,
+                                            range: (from, len),
+                                        });
+                                    },
+                                )?;
+                            } else {
+                                let content_range = resp
+                                    .headers()
+                                    .get(CONTENT_RANGE)
+                                    .expect("Content-Range must be existed");
+                                let (from, to, _) =
+                                    parse_range_header(content_range.to_str().map_err(|err| {
+                                        IOError::new(IOErrorKind::InvalidData, err)
+                                    })?);
+                                let len = to - from + 1;
+                                let mut data = Vec::with_capacity(len as usize);
+                                resp.copy_to(&mut data).unwrap();
+                                parts.push(RangePart {
+                                    data,
+                                    range: (from, len),
+                                });
+                            }
                         }
                         _ => {
                             return Err(IOError::new(
@@ -196,14 +231,13 @@ impl RangeReader {
                         }
                     }
 
-                    Ok(cursor.position() as usize)
+                    Ok(parts)
                 });
             match result {
-                Ok(size) => {
-                    return Ok(size);
+                Ok(parts) => {
+                    return Ok(parts);
                 }
                 Err(err) => {
-                    cursor.set_position(0);
                     io_error = Some(err);
                 }
             }
@@ -220,6 +254,14 @@ impl RangeReader {
                 })
                 .collect::<Vec<_>>()
                 .join(",")
+        }
+
+        fn parse_range_header(range: &str) -> (u64, u64, u64) {
+            let from: u64;
+            let to: u64;
+            let total_size: u64;
+            scan!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
+            (from, to, total_size)
         }
 
         fn extract_boundary<'s>(content_type: &'s str) -> Option<&'s str> {
@@ -665,8 +707,20 @@ mod tests {
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     let mut response_body = Multipart::new();
-                    response_body.add_text("", "12345");
-                    response_body.add_text("", "67890");
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"12345"),
+                        None,
+                        None,
+                        Some("bytes 0-4/10"),
+                    );
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"67890"),
+                        None,
+                        None,
+                        Some("bytes 5-9/19"),
+                    );
                     let mut fields = response_body.prepare().unwrap();
                     let mut buffer = Vec::new();
                     fields.read_to_end(&mut buffer).unwrap();
@@ -686,12 +740,12 @@ mod tests {
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
-                let mut buf = [0; 10];
-                assert_eq!(
-                    range_reader.read_multi_range(&mut buf, &ranges).unwrap(),
-                    10
-                );
-                assert_eq!(&buf, b"1234567890");
+                let parts = range_reader.read_multi_range(&ranges).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(&parts.get(1).unwrap().data, b"12345");
+                assert_eq!(parts.get(1).unwrap().range, (0, 5));
+                assert_eq!(&parts.get(0).unwrap().data, b"67890");
+                assert_eq!(parts.get(0).unwrap().range, (5, 5));
             })
             .await?;
         });
@@ -713,12 +767,12 @@ mod tests {
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
-                let mut buf = [0; 10];
-                assert_eq!(
-                    range_reader.read_multi_range(&mut buf, &ranges).unwrap(),
-                    10
-                );
-                assert_eq!(&buf, b"1234567890");
+                let parts = range_reader.read_multi_range(&ranges).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(&parts.get(0).unwrap().data, b"12345");
+                assert_eq!(parts.get(0).unwrap().range, (0, 5));
+                assert_eq!(&parts.get(1).unwrap().data, b"67890");
+                assert_eq!(parts.get(1).unwrap().range, (5, 5));
             })
             .await?;
         });
@@ -745,9 +799,7 @@ mod tests {
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
-                range_reader
-                    .read_multi_range(&mut Vec::<u8>::new(), &ranges)
-                    .unwrap_err();
+                range_reader.read_multi_range(&ranges).unwrap_err();
                 assert_eq!(counter.load(Relaxed), 3);
             })
             .await?;
@@ -763,8 +815,20 @@ mod tests {
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     let mut response_body = Multipart::new();
-                    response_body.add_text("", "12345");
-                    response_body.add_text("", "67890");
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"12345"),
+                        None,
+                        None,
+                        Some("bytes 0-4/6"),
+                    );
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"6"),
+                        None,
+                        None,
+                        Some("bytes 5-5/6"),
+                    );
                     let mut fields = response_body.prepare().unwrap();
                     let mut buffer = Vec::new();
                     fields.read_to_end(&mut buffer).unwrap();
@@ -784,9 +848,12 @@ mod tests {
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
-                let mut buf = [0; 6];
-                assert_eq!(range_reader.read_multi_range(&mut buf, &ranges).unwrap(), 6,);
-                assert_eq!(&buf, b"123456");
+                let parts = range_reader.read_multi_range(&ranges).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(&parts.get(1).unwrap().data, b"12345");
+                assert_eq!(parts.get(1).unwrap().range, (0, 5));
+                assert_eq!(&parts.get(0).unwrap().data, b"6");
+                assert_eq!(parts.get(0).unwrap().range, (5, 1));
             })
             .await?;
         });
@@ -799,18 +866,48 @@ mod tests {
             path!("file")
                 .and(header::value("Range"))
                 .map(move |range: HeaderValue| {
-                    assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
-                    "12345678901357924680"
+                    assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-5");
+                    "1234"
                 })
         };
         starts_with_server!(addr, routes, {
             let url = format!("http://{}/file", addr);
             let range_reader = RangeReader::new(&[url.to_owned()], 3);
-            let ranges = [(0, 5), (5, 5)];
+            let ranges = [(0, 5), (5, 1)];
             spawn_blocking(move || {
-                let mut buf = [0; 6];
-                assert_eq!(range_reader.read_multi_range(&mut buf, &ranges).unwrap(), 6);
-                assert_eq!(&buf, b"123456");
+                let parts = range_reader.read_multi_range(&ranges).unwrap();
+                assert_eq!(parts.len(), 1);
+                assert_eq!(&parts.get(0).unwrap().data, b"1234");
+                assert_eq!(parts.get(0).unwrap().range, (0, 4));
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_range_6() -> Result<(), Box<dyn Error>> {
+        let routes = {
+            path!("file")
+                .and(header::value("Range"))
+                .map(move |range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=0-3");
+                    let mut response = Response::new("123".into());
+                    response
+                        .headers_mut()
+                        .insert(CONTENT_RANGE, "bytes 0-3/3".parse().unwrap());
+                    response
+                })
+        };
+        starts_with_server!(addr, routes, {
+            let url = format!("http://{}/file", addr);
+            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let ranges = [(0, 4)];
+            spawn_blocking(move || {
+                let parts = range_reader.read_multi_range(&ranges).unwrap();
+                assert_eq!(parts.len(), 1);
+                assert_eq!(&parts.get(0).unwrap().data, b"123");
+                assert_eq!(parts.get(0).unwrap().range, (0, 3));
             })
             .await?;
         });
