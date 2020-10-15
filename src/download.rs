@@ -17,6 +17,7 @@ use std::{
     },
     result::Result,
     sync::Mutex,
+    thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use text_io::scan;
@@ -104,7 +105,9 @@ impl ReadAt for RangeReader {
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
         let range = format!("bytes={}-{}", pos, pos + size - 1);
-        for url in self.choose_urls() {
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range)
@@ -148,7 +151,9 @@ impl RangeReader {
         let range_header_value = format!("bytes={}", generate_range_header(range));
         let mut io_error: Option<IOError> = None;
 
-        for url in self.choose_urls() {
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range_header_value)
@@ -282,7 +287,9 @@ impl RangeReader {
 
     pub fn file_size(&self) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
-        for url in self.choose_urls() {
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
             let result = HTTP_CLIENT
                 .head(url)
                 .send()
@@ -316,7 +323,9 @@ impl RangeReader {
         let mut io_error: Option<IOError> = None;
         let init_start_from = writer.seek(SeekFrom::End(0))?;
         let mut start_from = init_start_from;
-        for url in self.choose_urls() {
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
             let mut req = HTTP_CLIENT.get(url);
             if start_from > 0 {
                 req = req.header(RANGE, format!("bytes={}-", start_from));
@@ -430,7 +439,9 @@ impl RangeReader {
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
         let range = format!("bytes=-{}", size);
-        for url in self.choose_urls() {
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range)
@@ -494,6 +505,13 @@ fn parse_total_size_from_content_range(resp: &HTTPResponse) -> u64 {
         .and_then(|line| line.split("/").nth(1))
         .and_then(|length| length.parse().ok())
         .expect("Content-Range cannot be parsed")
+}
+
+fn sleep_before_retry(tries: usize) {
+    let wait = 500 * (tries << 1) as u64;
+    if wait > 0 {
+        sleep(Duration::from_millis(wait));
+    }
 }
 
 #[cfg(test)]
