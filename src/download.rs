@@ -20,7 +20,7 @@ use std::{
     thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
-use text_io::scan;
+use text_io::{try_scan as try_scan_text, Error as TextIOError};
 use url::Url;
 
 static QINIU_USER_AGENT: Lazy<Box<str>> =
@@ -200,7 +200,8 @@ impl RangeReader {
                                             .headers
                                             .content_range
                                             .expect("Content-Range must be existed");
-                                        let (from, to, _) = parse_range_header(&content_range);
+                                        let (from, to, _) = parse_range_header(&content_range)
+                                            .expect("Invalid Content-Range");
                                         let len = to - from + 1;
                                         let mut data = Vec::with_capacity(len as usize);
                                         field.data.read_to_end(&mut data).unwrap();
@@ -215,10 +216,11 @@ impl RangeReader {
                                     .headers()
                                     .get(CONTENT_RANGE)
                                     .expect("Content-Range must be existed");
-                                let (from, to, _) =
-                                    parse_range_header(content_range.to_str().map_err(|err| {
-                                        IOError::new(IOErrorKind::InvalidData, err)
-                                    })?);
+                                let (from, to, _) = content_range
+                                    .to_str()
+                                    .ok()
+                                    .and_then(|r| parse_range_header(r).ok())
+                                    .expect("Invalid Content-Range");
                                 let len = to - from + 1;
                                 let mut data = Vec::with_capacity(len as usize);
                                 resp.copy_to(&mut data).unwrap();
@@ -445,12 +447,13 @@ impl RangeReader {
                     if code != StatusCode::PARTIAL_CONTENT {
                         return Err(IOError::new(IOErrorKind::Other, "Status code is not 206"));
                     }
-                    let (_, _, total_size) = parse_range_header(
-                        resp.headers()
-                            .get(CONTENT_RANGE)
-                            .and_then(|r| r.to_str().ok())
-                            .expect("Content-Range must be existed"),
-                    );
+                    let content_range = resp
+                        .headers()
+                        .get(CONTENT_RANGE)
+                        .and_then(|r| r.to_str().ok())
+                        .expect("Content-Range must be existed");
+                    let (_, _, total_size) =
+                        parse_range_header(content_range).expect("Invalid Content-Range");
                     let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
                     Ok((actual_size, total_size))
                 });
@@ -495,12 +498,12 @@ fn parse_content_length(resp: &HTTPResponse) -> u64 {
         .expect("Content-Length must be existed")
 }
 
-fn parse_range_header(range: &str) -> (u64, u64, u64) {
+fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
     let from: u64;
     let to: u64;
     let total_size: u64;
-    scan!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
-    (from, to, total_size)
+    try_scan_text!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
+    Ok((from, to, total_size))
 }
 
 fn sleep_before_retry(tries: usize) {
