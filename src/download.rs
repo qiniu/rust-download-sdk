@@ -6,7 +6,7 @@ use rand::{seq::SliceRandom, thread_rng};
 use rayon::prelude::*;
 use reqwest::{
     blocking::{Client as HTTPClient, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE, USER_AGENT},
+    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     StatusCode,
 };
 use sema::Semaphore;
@@ -22,9 +22,6 @@ use std::{
 };
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
 use url::Url;
-
-static QINIU_USER_AGENT: Lazy<Box<str>> =
-    Lazy::new(|| format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION")).into());
 
 pub fn sign_download_url_with_deadline(
     c: &Credential,
@@ -56,7 +53,16 @@ pub fn sign_download_url_with_lifetime(
     sign_download_url_with_deadline(c, url, deadline)
 }
 
-static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(Default::default);
+static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(|| {
+    let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
+    HTTPClient::builder()
+        .user_agent(user_agent)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(5)
+        .build()
+        .expect("Failed to build Reqwest Client")
+});
 
 #[derive(Debug)]
 pub struct RangeReader {
@@ -111,7 +117,6 @@ impl ReadAt for RangeReader {
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range)
-                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
@@ -157,7 +162,6 @@ impl RangeReader {
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range_header_value)
-                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -325,7 +329,6 @@ impl RangeReader {
                 req = req.header(RANGE, format!("bytes={}-", start_from));
             }
             let result = req
-                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -439,7 +442,6 @@ impl RangeReader {
             let result = HTTP_CLIENT
                 .get(url)
                 .header(RANGE, &range)
-                .header(USER_AGENT, QINIU_USER_AGENT.as_ref())
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
