@@ -1,11 +1,10 @@
-use super::base::credential::Credential;
+use super::{base::credential::Credential, query, HTTP_CLIENT};
 use multipart::server::Multipart;
-use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
 use rayon::prelude::*;
 use reqwest::{
-    blocking::{Client as HTTPClient, Response as HTTPResponse},
+    blocking::Response as HTTPResponse,
     header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     StatusCode,
 };
@@ -53,17 +52,6 @@ pub fn sign_download_url_with_lifetime(
     sign_download_url_with_deadline(c, url, deadline)
 }
 
-static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(|| {
-    let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
-    HTTPClient::builder()
-        .user_agent(user_agent)
-        .connect_timeout(Duration::from_millis(500))
-        .timeout(Duration::from_secs(30))
-        .pool_max_idle_per_host(5)
-        .build()
-        .expect("Failed to build Reqwest Client")
-});
-
 #[derive(Debug)]
 pub struct RangeReader {
     urls: Vec<String>,
@@ -81,12 +69,12 @@ impl RangeReader {
 
     pub fn new_from_key(
         key: impl AsRef<str>,
-        domains: &[String],
+        urls: &[String],
         credential: &Credential,
         lifetime: Duration,
         tries: usize,
     ) -> Result<Self, SystemTimeError> {
-        let urls = domains
+        let urls = urls
             .iter()
             .map(|domain| {
                 let url = domain.to_owned() + key.as_ref();
@@ -99,6 +87,21 @@ impl RangeReader {
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self::new(&urls, tries))
+    }
+
+    pub fn new_from_bucket_and_key(
+        bucket: impl AsRef<str>,
+        key: impl AsRef<str>,
+        uc_urls: &[String],
+        credential: &Credential,
+        lifetime: Duration,
+        tries: usize,
+        use_https: bool,
+    ) -> IOResult<Self> {
+        let io_urls =
+            query::query_for_io_urls(credential.access_key(), bucket.as_ref(), uc_urls, use_https)?;
+        Self::new_from_key(key, &io_urls, credential, lifetime, tries)
+            .map_err(|err| IOError::new(IOErrorKind::Other, err))
     }
 }
 

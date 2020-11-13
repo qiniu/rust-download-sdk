@@ -10,11 +10,17 @@ pub struct Credential {
 }
 
 impl Credential {
+    #[inline]
     pub fn new(ak: impl Into<String>, sk: impl Into<String>) -> Credential {
         Credential {
             access_key: ak.into(),
             secret_key: sk.into(),
         }
+    }
+
+    #[inline]
+    pub(crate) fn access_key(&self) -> &str {
+        &self.access_key
     }
 
     pub(crate) fn sign(&self, data: &[u8]) -> String {
