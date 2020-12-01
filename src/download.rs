@@ -311,7 +311,7 @@ impl RangeReader {
                 }
             }
         }
-        return Err(io_error.unwrap());
+        Err(io_error.unwrap())
     }
 
     pub fn download(&self) -> IOResult<Vec<u8>> {
@@ -363,7 +363,7 @@ impl RangeReader {
                 }
             }
         }
-        return Err(io_error.unwrap());
+        Err(io_error.unwrap())
     }
 
     pub fn flash_download_to(
@@ -419,7 +419,7 @@ impl RangeReader {
             })
             .collect::<IOResult<Vec<u64>>>()?
             .iter()
-            .fold(0, |sum, have_read| sum + have_read);
+            .sum();
         return Ok(downloaded);
 
         fn split_parts(part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
