@@ -2,6 +2,7 @@ use anyhow::Result;
 use qiniu_download::RangeReader;
 use std::{fmt, str::FromStr};
 use structopt::StructOpt;
+use url::{ParseError as UrlParseError, Url};
 
 #[derive(Debug, StructOpt)]
 #[structopt(
@@ -21,8 +22,13 @@ struct Opt {
 
 fn main() -> Result<()> {
     let opt = Opt::from_args();
+    let urls = opt
+        .urls
+        .iter()
+        .map(|url| Url::parse(url))
+        .collect::<Result<Vec<Url>, UrlParseError>>()?;
 
-    let reader = RangeReader::new(&opt.urls, opt.tries);
+    let reader = RangeReader::new(urls, opt.tries);
     let parts = reader.read_multi_range(&opt.ranges.to_ranges())?;
     for part in parts.iter() {
         println!("data: {:?}", part.data);

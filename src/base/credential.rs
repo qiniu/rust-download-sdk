@@ -4,6 +4,7 @@ use sha1::Sha1;
 
 use super::base64;
 
+/// 七牛凭证，用于设置 Access Key 和 Secret Key 以访问私有空间的七牛对象
 pub struct Credential {
     access_key: String,
     secret_key: String,
@@ -11,6 +12,10 @@ pub struct Credential {
 
 impl Credential {
     #[inline]
+    /// 创建七牛凭证
+    /// # Arguments
+    /// * `ak` - 七牛 Access Key
+    /// * `sk` - 七牛 Secret Key
     pub fn new(ak: impl Into<String>, sk: impl Into<String>) -> Credential {
         Credential {
             access_key: ak.into(),
@@ -41,6 +46,8 @@ mod tests {
 
     #[test]
     fn test_sign() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let credential = Arc::new(Credential::new("abcdefghklmnopq", "1234567890"));
         let mut threads = Vec::new();
         {

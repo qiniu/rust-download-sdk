@@ -1,27 +1,37 @@
-use super::{base::credential::Credential, query, HTTP_CLIENT};
+use super::{
+    base::credential::Credential,
+    config::{build_range_reader_builder_from_config, build_range_reader_builder_from_env, Config},
+    query::query_for_io_urls,
+    req_id::{get_req_id, REQUEST_ID_HEADER},
+    HTTP_CLIENT,
+};
+use log::{debug, warn};
 use multipart::server::Multipart;
 use positioned_io::ReadAt;
 use rand::{seq::SliceRandom, thread_rng};
-use rayon::prelude::*;
 use reqwest::{
     blocking::Response as HTTPResponse,
     header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     StatusCode,
 };
-use sema::Semaphore;
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
         Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
-    sync::Mutex,
     thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
 use url::Url;
 
+/// 为私有空间签发对象下载 URL
+/// # Arguments
+///
+/// * `c` - 私有空间所在账户的凭证
+/// * `url` - 对象下载 URL
+/// * `deadline` - 下载 URL 有效截止时间
 pub fn sign_download_url_with_deadline(
     c: &Credential,
     url: Url,
@@ -43,6 +53,12 @@ pub fn sign_download_url_with_deadline(
     Ok(signed_url)
 }
 
+/// 为私有空间签发对象下载 URL
+/// # Arguments
+///
+/// * `c` - 私有空间所在账户的凭证
+/// * `url` - 对象下载 URL
+/// * `lifetime` - 下载 URL 有效期
 pub fn sign_download_url_with_lifetime(
     c: &Credential,
     url: Url,
@@ -52,56 +68,208 @@ pub fn sign_download_url_with_lifetime(
     sign_download_url_with_deadline(c, url, deadline)
 }
 
+/// 对象范围下载器
 #[derive(Debug)]
 pub struct RangeReader {
-    urls: Vec<String>,
+    urls: Vec<Url>,
     tries: usize,
+    max_continuous_failed_times: usize,
+    max_continuous_failed_duration: Duration,
+    max_seek_hosts_percent: usize,
+    // hostname_failures: DashMap<String, FailureInfo>,
 }
 
-impl RangeReader {
-    pub fn new(urls: &[String], tries: usize) -> Self {
+/// 对象范围下载构建器
+#[derive(Debug, Default)]
+pub struct RangeReaderBuilder {
+    inner: RangeReader,
+}
+
+impl RangeReaderBuilder {
+    /// 设置对象下载 URL 列表
+    #[inline]
+    pub fn urls(mut self, urls: Vec<Url>) -> Self {
+        self.inner.urls = urls;
+        self
+    }
+
+    /// 设置对象下载最大尝试次数
+    #[inline]
+    pub fn tries(mut self, tries: usize) -> Self {
+        self.inner.tries = tries;
+        self
+    }
+
+    /// 设置对象下载最大连续错误次数
+    #[inline]
+    pub fn max_continuous_failed_times(mut self, max_times: usize) -> Self {
+        self.inner.max_continuous_failed_times = max_times;
+        self
+    }
+
+    /// 设置对象下载最大连续错误时长
+    #[inline]
+    pub fn max_continuous_failed_duration(mut self, failed_duration: Duration) -> Self {
+        self.inner.max_continuous_failed_duration = failed_duration;
+        self
+    }
+
+    /// 设置对象下载最大搜索主机地址百分比
+    #[inline]
+    pub fn max_seek_hosts_percent(mut self, percent: usize) -> Self {
+        self.inner.max_seek_hosts_percent = percent;
+        self
+    }
+
+    /// 构建范围下载器
+    #[inline]
+    pub fn build(self) -> RangeReader {
+        self.inner
+    }
+
+    /// 创建范围下载构建器
+    /// # Arguments
+    ///
+    /// * `bucket` - 存储空间
+    /// * `key` - 对象名称
+    /// * `uc_urls` - UC 服务器 URL 列表
+    /// * `io_urls` - IO 服务器 URL 列表
+    /// * `credential` - 存储空间所在账户的凭证
+    /// * `use_getfile` - 是否使用 getfile API 下载
+    /// * `private_url_lifetime` - 私有空间下载 URL 有效期，如果为 None，则使用公开空间下载 URL
+    /// * `tries` - 最大下载测试次数
+    pub fn new(
+        bucket: &str,
+        key: &str,
+        uc_urls: Option<&[String]>,
+        io_urls: &[String],
+        credential: &Credential,
+        use_getfile: bool,
+        private_url_lifetime: Option<Duration>,
+        tries: usize,
+    ) -> Self {
         assert!(tries > 0);
-        Self {
-            urls: urls.to_owned(),
-            tries,
+        let new_io_urls = uc_urls
+            .map(|uc_urls| {
+                query_for_io_urls(credential.access_key(), bucket, uc_urls, false)
+                    .unwrap_or_else(|_| io_urls.to_owned())
+            })
+            .unwrap_or_else(|| io_urls.to_owned());
+        let urls = new_io_urls
+            .iter()
+            .map(|io_url| {
+                let url =
+                    make_download_url(io_url, credential.access_key(), bucket, key, use_getfile);
+                sign_download_url_if_needed(&url, private_url_lifetime, credential)
+            })
+            .collect::<Vec<_>>();
+        return Self::default().urls(urls).tries(tries);
+
+        fn make_download_url(
+            io_url: &str,
+            access_key: &str,
+            bucket: &str,
+            key: &str,
+            use_getfile: bool,
+        ) -> String {
+            let mut url = if use_getfile {
+                io_url.to_owned()
+            } else {
+                format!("{}/getfile/{}/{}", io_url, access_key, bucket)
+            };
+            if url.ends_with("/") && key.starts_with("/") {
+                url.truncate(url.len() - 1);
+            } else if !url.ends_with("/") && !key.starts_with("/") {
+                url.push_str("/");
+            }
+            url.push_str(key);
+            return url;
+        }
+
+        fn sign_download_url_if_needed(
+            url: &str,
+            private_url_lifetime: Option<Duration>,
+            credential: &Credential,
+        ) -> Url {
+            if let Some(private_url_lifetime) = private_url_lifetime {
+                Url::parse(
+                    &sign_download_url_with_lifetime(
+                        &credential,
+                        Url::parse(&url).unwrap(),
+                        private_url_lifetime,
+                    )
+                    .unwrap(),
+                )
+                .unwrap()
+            } else {
+                Url::parse(&url).unwrap()
+            }
         }
     }
 
-    pub fn new_from_key(
-        key: impl AsRef<str>,
-        urls: &[String],
-        credential: &Credential,
-        lifetime: Duration,
-        tries: usize,
-    ) -> Result<Self, SystemTimeError> {
-        let urls = urls
-            .iter()
-            .map(|domain| {
-                let url = domain.to_owned() + key.as_ref();
-                let signed_url = sign_download_url_with_lifetime(
-                    credential,
-                    Url::parse(&url).unwrap(),
-                    lifetime,
-                )?;
-                Ok(signed_url)
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Self::new(&urls, tries))
+    /// 从配置创建范围下载构建器
+    /// # Arguments
+    ///
+    /// * `key` - 对象名称
+    /// * `config` - 下载配置
+    #[inline]
+    pub fn from_config(key: impl AsRef<str>, config: &Config) -> Self {
+        build_range_reader_builder_from_config(key.as_ref(), config)
     }
 
-    pub fn new_from_bucket_and_key(
-        bucket: impl AsRef<str>,
-        key: impl AsRef<str>,
-        uc_urls: &[String],
-        credential: &Credential,
-        lifetime: Duration,
-        tries: usize,
-        use_https: bool,
-    ) -> IOResult<Self> {
-        let io_urls =
-            query::query_for_io_urls(credential.access_key(), bucket.as_ref(), uc_urls, use_https)?;
-        Self::new_from_key(key, &io_urls, credential, lifetime, tries)
-            .map_err(|err| IOError::new(IOErrorKind::Other, err))
+    /// 从环境变量创建范围下载构建器
+    /// # Arguments
+    ///
+    /// * `key` - 对象名称
+    #[inline]
+    pub fn from_env(key: impl AsRef<str>) -> Option<Self> {
+        build_range_reader_builder_from_env(key.as_ref())
+    }
+}
+
+impl Default for RangeReader {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            urls: Default::default(),
+            tries: 5,
+            max_continuous_failed_times: 5,
+            max_continuous_failed_duration: Duration::from_secs(60),
+            max_seek_hosts_percent: 50,
+            // hostname_failures: Default::default(),
+        }
+    }
+}
+
+impl RangeReader {
+    /// 创建范围下载构建器
+    #[inline]
+    pub fn builder() -> RangeReaderBuilder {
+        RangeReaderBuilder::default()
+    }
+
+    /// 快速创建范围下载器
+    pub fn new(urls: Vec<Url>, tries: usize) -> Self {
+        Self::builder().urls(urls).tries(tries).build()
+    }
+
+    /// 从配置创建范围下载器
+    /// # Arguments
+    ///
+    /// * `key` - 对象名称
+    /// * `config` - 下载配置
+    #[inline]
+    pub fn from_config(key: impl AsRef<str>, config: &Config) -> Self {
+        RangeReaderBuilder::from_config(key, config).build()
+    }
+
+    /// 从环境变量创建范围下载器
+    /// # Arguments
+    ///
+    /// * `key` - 对象名称
+    #[inline]
+    pub fn from_env(key: impl AsRef<str>) -> Option<Self> {
+        RangeReaderBuilder::from_env(key).map(|b| b.build())
     }
 }
 
@@ -113,20 +281,31 @@ impl ReadAt for RangeReader {
         }
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
+        let mut last_url: Option<&Url> = None;
+        let mut retry = true;
         let range = format!("bytes={}-{}", pos, pos + size - 1);
+
+        let now = SystemTime::now();
         for (tries, url) in self.choose_urls().into_iter().enumerate() {
             sleep_before_retry(tries);
 
+            last_url = Some(&url);
+            debug!("read_at url: {}, range: {}", url, &range);
+
             let result = HTTP_CLIENT
-                .get(url)
+                .get(url.as_str())
                 .header(RANGE, &range)
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .send()
-                .map_err(|err| IOError::new(IOErrorKind::Other, err))
+                .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                 .and_then(|resp| {
                     let code = resp.status();
                     if code != StatusCode::PARTIAL_CONTENT && code != StatusCode::OK {
+                        if code.is_client_error() {
+                            retry = false;
+                        }
                         return Err(IOError::new(
-                            IOErrorKind::Other,
+                            IOErrorKind::InvalidData,
                             "Status code is neither 200 nor 206",
                         ));
                     }
@@ -139,11 +318,24 @@ impl ReadAt for RangeReader {
                     return Ok(size as usize);
                 }
                 Err(err) => {
+                    warn!(
+                        "read_at error url: {}, range: {}, error: {}",
+                        url, range, err
+                    );
                     cursor.set_position(0);
-                    io_error = Some(err);
+                    io_error = Some(IOError::new(IOErrorKind::ConnectionAborted, err));
+
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
+        warn!(
+            "final failed read at url = {}, error: {:?}",
+            last_url.unwrap(),
+            io_error
+        );
         Err(io_error.unwrap())
     }
 }
@@ -155,16 +347,24 @@ pub struct RangePart {
 }
 
 impl RangeReader {
+    /// 读取文件的多个区域，返回每个区域对应的数据
+    /// # Arguments
+    /// * `range` - 区域列表，每个区域有开始和结束两个偏移量组成（包含开始偏移量，不包含结束偏移量），
     pub fn read_multi_range(&self, range: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(range));
         let mut io_error: Option<IOError> = None;
+        let now = SystemTime::now();
+        let mut retry = true;
 
         for (tries, url) in self.choose_urls().into_iter().enumerate() {
             sleep_before_retry(tries);
 
+            debug!("read_multi_range url: {}, range: {:?}", url, range);
+
             let result = HTTP_CLIENT
-                .get(url)
+                .get(url.as_str())
                 .header(RANGE, &range_header_value)
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -188,46 +388,77 @@ impl RangeReader {
                         StatusCode::PARTIAL_CONTENT => {
                             if range.len() > 1 {
                                 let boundary = {
-                                    let content_type = resp
-                                        .headers()
-                                        .get(CONTENT_TYPE)
-                                        .expect("Content-Type must be existed");
-                                    extract_boundary(
-                                        &content_type
-                                            .to_str()
-                                            .map_err(|err| IOError::new(IOErrorKind::Other, err))?,
-                                    )
-                                    .expect("Boundary must be existed in Content-Type")
+                                    let content_type =
+                                        resp.headers().get(CONTENT_TYPE).ok_or_else(|| {
+                                            IOError::new(
+                                                IOErrorKind::InvalidData,
+                                                "Content-Type must be existed",
+                                            )
+                                        })?;
+                                    extract_boundary(&content_type.to_str().map_err(|err| {
+                                        IOError::new(IOErrorKind::InvalidData, err)
+                                    })?)
+                                    .ok_or_else(|| {
+                                        IOError::new(
+                                            IOErrorKind::InvalidData,
+                                            "Boundary must be existed in Content-Type",
+                                        )
+                                    })?
                                     .to_owned()
                                 };
 
-                                Multipart::with_body(&mut resp, boundary).foreach_entry(
-                                    |mut field| {
-                                        let content_range = field
-                                            .headers
-                                            .content_range
-                                            .expect("Content-Range must be existed");
-                                        let (from, to, _) = parse_range_header(&content_range)
-                                            .expect("Invalid Content-Range");
-                                        let len = to - from + 1;
-                                        let mut data = Vec::with_capacity(len as usize);
-                                        field.data.read_to_end(&mut data).unwrap();
-                                        parts.push(RangePart {
-                                            data,
-                                            range: (from, len),
-                                        });
-                                    },
-                                )?;
+                                let mut multipart = Multipart::with_body(&mut resp, boundary);
+                                loop {
+                                    match multipart.read_entry() {
+                                        Ok(Some(mut field)) => {
+                                            let content_range =
+                                                field.headers.content_range.ok_or_else(|| {
+                                                    IOError::new(
+                                                        IOErrorKind::InvalidData,
+                                                        "Content-Range must be existed",
+                                                    )
+                                                })?;
+                                            let (from, to, _) = parse_range_header(&content_range)
+                                                .map_err(|_| {
+                                                    IOError::new(
+                                                        IOErrorKind::InvalidData,
+                                                        "Invalid Content-Range",
+                                                    )
+                                                })?;
+                                            let len = to - from + 1;
+                                            let mut data = Vec::with_capacity(len as usize);
+                                            field.data.read_to_end(&mut data).map_err(|err| {
+                                                IOError::new(IOErrorKind::BrokenPipe, err)
+                                            })?;
+                                            parts.push(RangePart {
+                                                data,
+                                                range: (from, len),
+                                            });
+                                        }
+                                        Ok(None) => break,
+                                        Err(err) => {
+                                            return Err(IOError::new(IOErrorKind::BrokenPipe, err))
+                                        }
+                                    }
+                                }
                             } else {
-                                let content_range = resp
-                                    .headers()
-                                    .get(CONTENT_RANGE)
-                                    .expect("Content-Range must be existed");
+                                let content_range =
+                                    resp.headers().get(CONTENT_RANGE).ok_or_else(|| {
+                                        IOError::new(
+                                            IOErrorKind::InvalidData,
+                                            "Content-Range must be existed",
+                                        )
+                                    })?;
                                 let (from, to, _) = content_range
                                     .to_str()
                                     .ok()
                                     .and_then(|r| parse_range_header(r).ok())
-                                    .expect("Invalid Content-Range");
+                                    .ok_or_else(|| {
+                                        IOError::new(
+                                            IOErrorKind::InvalidData,
+                                            "Invalid Content-Range",
+                                        )
+                                    })?;
                                 let len = to - from + 1;
                                 let mut data = Vec::with_capacity(len as usize);
                                 resp.copy_to(&mut data).unwrap();
@@ -238,6 +469,9 @@ impl RangeReader {
                             }
                         }
                         _ => {
+                            if resp.status().is_client_error() {
+                                retry = false;
+                            }
                             return Err(IOError::new(
                                 IOErrorKind::Other,
                                 "Status code is neither 200 nor 206",
@@ -252,7 +486,14 @@ impl RangeReader {
                     return Ok(parts);
                 }
                 Err(err) => {
+                    warn!(
+                        "read_multi_range error url: {}, range: {:?}, error: {}",
+                        url, range, err
+                    );
                     io_error = Some(err);
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
@@ -282,23 +523,72 @@ impl RangeReader {
         }
     }
 
+    /// 判定当前对象是否存在
     pub fn exist(&self) -> IOResult<bool> {
-        self.file_size().map(|_| true)
-    }
-
-    pub fn file_size(&self) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
+        let now = SystemTime::now();
+        let mut retry = true;
         for (tries, url) in self.choose_urls().into_iter().enumerate() {
             sleep_before_retry(tries);
 
+            debug!("exist url: {}", url);
+
             let result = HTTP_CLIENT
-                .head(url)
+                .head(url.as_str())
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
+                .send()
+                .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
+                .and_then(|resp| match resp.status() {
+                    StatusCode::OK => Ok(true),
+                    StatusCode::NOT_FOUND => Ok(false),
+                    _ => {
+                        if resp.status().is_client_error() {
+                            retry = false;
+                        }
+                        Err(IOError::new(
+                            IOErrorKind::BrokenPipe,
+                            "Status code is neither 200 nor 404",
+                        ))
+                    }
+                });
+            match result {
+                Ok(result) => {
+                    return Ok(result);
+                }
+                Err(err) => {
+                    warn!("exist error url: {}, error: {}", url, err);
+                    io_error = Some(err);
+                    if !retry {
+                        break;
+                    }
+                }
+            }
+        }
+        Err(io_error.unwrap())
+    }
+
+    /// 获取当前对象的文件大小
+    pub fn file_size(&self) -> IOResult<u64> {
+        let mut io_error: Option<IOError> = None;
+        let now = SystemTime::now();
+        let mut retry = true;
+        for (tries, url) in self.choose_urls().into_iter().enumerate() {
+            sleep_before_retry(tries);
+
+            debug!("file_size url: {}", url);
+
+            let result = HTTP_CLIENT
+                .head(url.as_str())
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|resp| {
                     if resp.status() == StatusCode::OK {
                         Ok(parse_content_length(&resp))
                     } else {
+                        if resp.status().is_client_error() {
+                            retry = false;
+                        }
                         Err(IOError::new(IOErrorKind::Other, "Status code is not 200"))
                     }
                 });
@@ -307,31 +597,42 @@ impl RangeReader {
                     return Ok(size);
                 }
                 Err(err) => {
+                    warn!("file_size error url: {}, error: {}", url, err);
                     io_error = Some(err);
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
         Err(io_error.unwrap())
     }
 
+    /// 下载当前对象到内存缓冲区中
     pub fn download(&self) -> IOResult<Vec<u8>> {
         let mut bytes = Cursor::new(Vec::new());
-        self.download_to(&mut bytes, None)?;
+        self.download_to(&mut bytes)?;
         Ok(bytes.into_inner())
     }
 
-    pub fn download_to(&self, writer: &mut dyn WriteSeek, max_size: Option<u64>) -> IOResult<u64> {
+    /// 下载当前对象到指定输出流中
+    pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let mut io_error: Option<IOError> = None;
         let init_start_from = writer.seek(SeekFrom::End(0))?;
         let mut start_from = init_start_from;
+        let now = SystemTime::now();
+        let mut retry = true;
         for (tries, url) in self.choose_urls().into_iter().enumerate() {
             sleep_before_retry(tries);
 
-            let mut req = HTTP_CLIENT.get(url);
+            debug!("download_to url: {}, start_from: {}", url, start_from);
+
+            let mut req = HTTP_CLIENT.get(url.as_str());
             if start_from > 0 {
                 req = req.header(RANGE, format!("bytes={}-", start_from));
             }
             let result = req
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .send()
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))
                 .and_then(|mut resp| {
@@ -340,125 +641,74 @@ impl RangeReader {
                     } else if resp.status() != StatusCode::OK
                         && resp.status() != StatusCode::PARTIAL_CONTENT
                     {
+                        if resp.status().is_client_error() {
+                            retry = false;
+                        }
                         return Err(IOError::new(
                             IOErrorKind::Other,
                             "Status code is neither 200 nor 206",
                         ));
                     }
-                    if let Some(max_size) = max_size {
-                        io_copy(&mut resp.take(max_size), writer)
-                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
-                    } else {
-                        resp.copy_to(writer)
-                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
-                    }
+                    resp.copy_to(writer)
+                        .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                 });
+            let origin_start_from = start_from;
             start_from = writer.seek(SeekFrom::Current(0))?;
             match result {
                 Ok(_) => {
                     return Ok(start_from - init_start_from);
                 }
                 Err(err) => {
+                    warn!(
+                        "download error url: {}, start_from: {}, error: {}",
+                        url, origin_start_from, err
+                    );
                     io_error = Some(err);
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
         Err(io_error.unwrap())
     }
 
-    pub fn flash_download_to(
-        &self,
-        writer: &mut (dyn WriteSeek + Send),
-        max_size: Option<u64>,
-        part_size: u64,
-        concurrency: Option<usize>,
-    ) -> IOResult<u64> {
-        let total_size = {
-            let file_size = self.file_size()?;
-            if let Some(max_size) = max_size {
-                file_size.min(max_size)
-            } else {
-                file_size
-            }
-        };
-        let writer = Mutex::new(writer);
-        let semaphore = {
-            #[cfg(target_os = "linux")]
-            {
-                concurrency.map(Semaphore::new)
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                concurrency.map(|c| Semaphore::new(c as u32))
-            }
-        };
-        let downloaded = split_parts(part_size, total_size)
-            .into_par_iter()
-            .map(|(from, to)| {
-                let buf = {
-                    let _guard = semaphore.as_ref().take();
-                    let size = to - from;
-                    let mut buf = vec![0; size as usize];
-
-                    let have_read = self.read_at(from, &mut buf)?;
-                    if have_read as u64 != size {
-                        return Err(IOError::new(
-                            IOErrorKind::Other,
-                            format!(
-                                "Read from {}-{}, Expected got {} bytes, actually got {} bytes",
-                                from, to, size, have_read
-                            ),
-                        ));
-                    }
-                    buf
-                };
-                let mut w = writer.lock().unwrap();
-                w.seek(SeekFrom::Start(from))?;
-                w.write_all(&buf)?;
-                Ok(to - from)
-            })
-            .collect::<IOResult<Vec<u64>>>()?
-            .iter()
-            .sum();
-        return Ok(downloaded);
-
-        fn split_parts(part_size: u64, total_size: u64) -> Vec<(u64, u64)> {
-            let mut parts = Vec::new();
-            let mut start = 0;
-            while start < total_size {
-                let new_start = (start + part_size).min(total_size);
-                parts.push((start, new_start));
-                start = new_start;
-            }
-            parts
-        }
-    }
-
+    /// 下载对象的最后指定个字节到缓冲区中，返回实际下载的字节数和整个文件的大小
     pub fn read_last_bytes(&self, buf: &mut [u8]) -> IOResult<(u64, u64)> {
         let size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let mut io_error: Option<IOError> = None;
         let range = format!("bytes=-{}", size);
+        let now = SystemTime::now();
+        let mut retry = false;
         for (tries, url) in self.choose_urls().into_iter().enumerate() {
             sleep_before_retry(tries);
 
+            debug!("read_last_bytes url: {}, len: {}", url, size);
+
             let result = HTTP_CLIENT
-                .get(url)
+                .get(url.as_str())
                 .header(RANGE, &range)
+                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .send()
-                .map_err(|err| IOError::new(IOErrorKind::Other, err))
+                .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                 .and_then(|resp| {
-                    let code = resp.status();
-                    if code != StatusCode::PARTIAL_CONTENT {
+                    if resp.status() != StatusCode::PARTIAL_CONTENT {
+                        if resp.status().is_client_error() {
+                            retry = false;
+                        }
                         return Err(IOError::new(IOErrorKind::Other, "Status code is not 206"));
                     }
                     let content_range = resp
                         .headers()
                         .get(CONTENT_RANGE)
                         .and_then(|r| r.to_str().ok())
-                        .expect("Content-Range must be existed");
-                    let (_, _, total_size) =
-                        parse_range_header(content_range).expect("Invalid Content-Range");
+                        .ok_or_else(|| {
+                            IOError::new(IOErrorKind::InvalidData, "Content-Range must be existed")
+                        })?;
+                    let (_, _, total_size) = parse_range_header(content_range).map_err(|_| {
+                        IOError::new(IOErrorKind::InvalidData, "Invalid Content-Range")
+                    })?;
                     let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
                     Ok((actual_size, total_size))
                 });
@@ -467,19 +717,22 @@ impl RangeReader {
                     return Ok((actual_size, total_size));
                 }
                 Err(err) => {
+                    warn!("download error url: {}, len: {}, error: {}", url, size, err);
                     cursor.set_position(0);
                     io_error = Some(err);
+                    if !retry {
+                        break;
+                    }
                 }
             }
         }
         Err(io_error.unwrap())
     }
 
-    fn choose_urls(&self) -> Vec<&str> {
-        let mut urls: Vec<&str> = self
+    fn choose_urls(&self) -> Vec<&Url> {
+        let mut urls: Vec<_> = self
             .urls
             .choose_multiple(&mut thread_rng(), self.tries)
-            .map(|s| s.as_str())
             .collect();
         if urls.len() < self.tries {
             let still_needed = self.tries - urls.len();
@@ -512,9 +765,11 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
 }
 
 fn sleep_before_retry(tries: usize) {
-    let wait = 500 * (tries << 1) as u64;
-    if wait > 0 {
-        sleep(Duration::from_millis(wait));
+    if tries >= 3 {
+        let wait = 500 * (tries << 1) as u64;
+        if wait > 0 {
+            sleep(Duration::from_millis(wait));
+        }
     }
 }
 
@@ -558,6 +813,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             let action_1 = path!("file")
                 .and(header::value("Range"))
@@ -575,8 +832,8 @@ mod tests {
         };
         starts_with_server!(addr, routes, {
             {
-                let url = format!("http://{}/file", addr);
-                let downloader = RangeReader::new(&[url.to_owned()], 3);
+                let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+                let downloader = RangeReader::new(vec![url], 3);
                 spawn_blocking(move || {
                     let mut buf = [0u8; 6];
                     assert_eq!(downloader.read_at(5, &mut buf).unwrap(), 6);
@@ -585,8 +842,8 @@ mod tests {
                 .await?;
             }
             {
-                let url = format!("http://{}/file2", addr);
-                let downloader = RangeReader::new(&[url.to_owned()], 3);
+                let url = Url::parse(&format!("http://{}/file2", addr)).unwrap();
+                let downloader = RangeReader::new(vec![url], 3);
                 spawn_blocking(move || {
                     let mut buf = [0u8; 12];
                     assert_eq!(downloader.read_at(5, &mut buf).unwrap(), 10);
@@ -600,6 +857,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_read_at_2() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
             let counter = counter.to_owned();
@@ -614,8 +873,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
             spawn_blocking(move || {
                 let mut buf = [0u8; 5];
                 downloader.read_at(1, &mut buf).unwrap_err();
@@ -627,7 +886,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_read_at_3() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let routes = {
+            let counter = counter.to_owned();
+            path!("file")
+                .and(header::value("Range"))
+                .map(move |range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=1-5");
+                    counter.fetch_add(1, Relaxed);
+                    let mut resp = Response::new("12345".into());
+                    *resp.status_mut() = StatusCode::BAD_REQUEST;
+                    resp
+                })
+        };
+        starts_with_server!(addr, routes, {
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
+            spawn_blocking(move || {
+                let mut buf = [0u8; 5];
+                downloader.read_at(1, &mut buf).unwrap_err();
+                assert_eq!(counter.load(Relaxed), 1);
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn test_read_last_bytes() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = path!("file")
             .and(header::value("Range"))
             .map(|range: HeaderValue| {
@@ -642,8 +933,8 @@ mod tests {
             });
         starts_with_server!(addr, routes, {
             {
-                let url = format!("http://{}/file", addr);
-                let downloader = RangeReader::new(&[url.to_owned()], 3);
+                let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+                let downloader = RangeReader::new(vec![url], 3);
                 spawn_blocking(move || {
                     let mut buf = [0u8; 10];
                     assert_eq!(
@@ -660,10 +951,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_file() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
@@ -676,6 +969,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_file_2() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
             let counter = counter.to_owned();
@@ -687,8 +982,8 @@ mod tests {
             })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
             spawn_blocking(move || {
                 downloader.exist().unwrap_err();
                 downloader.file_size().unwrap_err();
@@ -702,19 +997,49 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_file_3() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let routes = {
+            let counter = counter.to_owned();
+            path!("file").map(move || {
+                counter.fetch_add(1, Relaxed);
+                let mut resp = Response::new("12345".into());
+                *resp.status_mut() = StatusCode::BAD_REQUEST;
+                resp
+            })
+        };
+        starts_with_server!(addr, routes, {
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
+            spawn_blocking(move || {
+                downloader.exist().unwrap_err();
+                downloader.file_size().unwrap_err();
+                downloader.download().unwrap_err();
+                assert_eq!(counter.load(Relaxed), 3);
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_file_4() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let downloader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let downloader = RangeReader::new(vec![url], 3);
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
                 let mut buf = Vec::new();
                 {
                     let mut cursor = Cursor::new(&mut buf);
-                    assert_eq!(downloader.download_to(&mut cursor, Some(5)).unwrap(), 5);
+                    assert_eq!(downloader.download_to(&mut cursor).unwrap(), 10);
                 }
-                assert_eq!(&buf, b"12345");
+                assert_eq!(&buf, b"1234567890");
             })
             .await?;
         });
@@ -723,6 +1048,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             path!("file")
                 .and(header::value("Range"))
@@ -758,8 +1085,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
                 let parts = range_reader.read_multi_range(&ranges).unwrap();
@@ -776,6 +1103,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_2() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             path!("file")
                 .and(header::value("Range"))
@@ -785,8 +1114,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
                 let parts = range_reader.read_multi_range(&ranges).unwrap();
@@ -803,6 +1132,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_3() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
             let counter = counter.to_owned();
@@ -817,8 +1148,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
                 range_reader.read_multi_range(&ranges).unwrap_err();
@@ -831,6 +1162,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_4() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             path!("file")
                 .and(header::value("Range"))
@@ -866,8 +1199,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
                 let parts = range_reader.read_multi_range(&ranges).unwrap();
@@ -884,6 +1217,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_5() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             path!("file")
                 .and(header::value("Range"))
@@ -893,8 +1228,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 5), (5, 1)];
             spawn_blocking(move || {
                 let parts = range_reader.read_multi_range(&ranges).unwrap();
@@ -909,6 +1244,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_download_range_6() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let routes = {
             path!("file")
                 .and(header::value("Range"))
@@ -922,8 +1259,8 @@ mod tests {
                 })
         };
         starts_with_server!(addr, routes, {
-            let url = format!("http://{}/file", addr);
-            let range_reader = RangeReader::new(&[url.to_owned()], 3);
+            let url = Url::parse(&format!("http://{}/file", addr)).unwrap();
+            let range_reader = RangeReader::new(vec![url], 3);
             let ranges = [(0, 4)];
             spawn_blocking(move || {
                 let parts = range_reader.read_multi_range(&ranges).unwrap();
@@ -938,6 +1275,8 @@ mod tests {
 
     #[test]
     fn test_sign_download_url_with_deadline() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         let credential = Credential::new("abcdefghklmnopq", "1234567890");
         assert_eq!(
             sign_download_url_with_deadline(&credential,

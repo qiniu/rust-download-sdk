@@ -317,6 +317,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_uc_query_v4() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         CACHE_MAP.clear();
         let _ = clear_queryers_cache();
 
@@ -362,6 +364,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_uc_query_v4_with_cache() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
         CACHE_MAP.clear();
         let _ = clear_queryers_cache();
 
