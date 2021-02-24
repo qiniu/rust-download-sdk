@@ -9,12 +9,14 @@
 mod base;
 mod config;
 mod download;
+mod host_selector;
 mod query;
 mod req_id;
 
 pub use base::credential::Credential;
 pub use config::is_qiniu_enabled;
 pub use download::{sign_download_url_with_deadline, sign_download_url_with_lifetime, RangeReader};
+pub use host_selector::{HostSelector, HostSelectorBuilder};
 pub use req_id::{set_download_start_time, total_download_duration};
 
 use once_cell::sync::Lazy;

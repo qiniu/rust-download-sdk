@@ -102,7 +102,7 @@ static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
 });
 static CACHE_FILE_LOCK: Lazy<Mutex<()>> = Lazy::new(Default::default);
 static CACHE_INIT: Lazy<()> = Lazy::new(|| {
-    load_queryers_cache().ok();
+    load_cache().ok();
 });
 
 pub(super) fn query_for_io_urls(
@@ -164,12 +164,12 @@ fn query_for_domains(ak: &str, bucket: &str, uc_urls: &[String]) -> IOResult<Res
                 }
             });
             if modified {
-                let _ = save_queryers_cache();
+                let _ = save_cache();
             }
         });
     } else if modified {
         spawn(move || {
-            let _ = save_queryers_cache();
+            let _ = save_cache();
         });
     }
 
@@ -227,7 +227,7 @@ fn query_for_domains_without_cache(
     Err(error.expect("No tries error"))
 }
 
-fn load_queryers_cache() -> IOResult<()> {
+fn load_cache() -> IOResult<()> {
     let cache_file_path = CACHE_DIR.join("query-cache.json");
     if let Ok(cache_file) = OpenOptions::new().read(true).open(&cache_file_path) {
         let cache: HashMap<CacheKey, CacheValue> =
@@ -240,7 +240,7 @@ fn load_queryers_cache() -> IOResult<()> {
     Ok(())
 }
 
-fn save_queryers_cache() -> IOResult<()> {
+fn save_cache() -> IOResult<()> {
     let cache_file_path = CACHE_DIR.join("query-cache.json");
 
     let cache_file_lock_result = CACHE_FILE_LOCK.try_lock();
@@ -433,7 +433,7 @@ mod tests {
                 assert_eq!(counter.load(Relaxed), 2);
 
                 CACHE_MAP.clear();
-                load_queryers_cache().ok();
+                load_cache().ok();
 
                 io_urls = query_for_io_urls(
                     ACCESS_KEY,
