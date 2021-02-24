@@ -7,7 +7,7 @@ use std::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc, RwLock,
     },
-    thread::{sleep, Builder as ThreadBuilder, JoinHandle},
+    thread::{sleep, Builder as ThreadBuilder},
     time::{Duration, SystemTime},
 };
 
@@ -46,10 +46,7 @@ impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdat
         })
     }
 
-    fn start_auto_update(
-        updater: &Arc<HostsUpdater<UpdateFn>>,
-        update_interval: Duration,
-    ) -> JoinHandle<()> {
+    fn start_auto_update(updater: &Arc<HostsUpdater<UpdateFn>>, update_interval: Duration) {
         let updater = Arc::downgrade(updater);
         ThreadBuilder::new()
             .name("host-selector-auto-updater".into())
@@ -61,7 +58,7 @@ impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdat
                     break;
                 }
             })
-            .unwrap()
+            .unwrap();
     }
 
     fn set_hosts(&self, mut hosts: Vec<String>) {
@@ -104,7 +101,6 @@ pub struct HostSelector<
     punish_duration: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
-    _update_thread: Arc<JoinHandle<()>>,
 }
 
 /// 域名选择构建器
@@ -183,16 +179,15 @@ impl<
     #[inline]
     pub fn build(self) -> Arc<HostSelector<UpdateFn, ShouldPunishFn>> {
         let hosts_updater = HostsUpdater::new(self.hosts, self.update_func);
+
+        HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
+
         let host_selector = Arc::new(HostSelector {
-            hosts_updater: hosts_updater.to_owned(),
+            hosts_updater,
             should_punish_func: self.should_punish_func,
             punish_duration: self.punish_duration,
             max_punished_times: self.max_punished_times,
             max_punished_hosts_percent: self.max_punished_hosts_percent,
-            _update_thread: Arc::new(HostsUpdater::start_auto_update(
-                &hosts_updater,
-                self.update_interval,
-            )),
         });
 
         host_selector
