@@ -26,15 +26,17 @@ impl Default for PunishedInfo {
     }
 }
 
-struct HostsUpdater<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> {
+type UpdateFn = Box<dyn Fn() -> IOResult<Vec<String>> + Sync + Send + 'static>;
+
+struct HostsUpdater {
     hosts: RwLock<Vec<String>>,
     hosts_map: DashMap<String, PunishedInfo>,
-    update_func: UpdateFn,
+    update_func: Option<UpdateFn>,
     index: AtomicUsize,
 }
 
-impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdater<UpdateFn> {
-    fn new(hosts: Vec<String>, update_func: UpdateFn) -> Arc<Self> {
+impl HostsUpdater {
+    fn new(hosts: Vec<String>, update_func: Option<UpdateFn>) -> Arc<Self> {
         Arc::new(Self {
             hosts_map: hosts
                 .iter()
@@ -46,7 +48,7 @@ impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdat
         })
     }
 
-    fn start_auto_update(updater: &Arc<HostsUpdater<UpdateFn>>, update_interval: Duration) {
+    fn start_auto_update(updater: &Arc<HostsUpdater>, update_interval: Duration) {
         let updater = Arc::downgrade(updater);
         ThreadBuilder::new()
             .name("host-selector-auto-updater".into())
@@ -74,10 +76,12 @@ impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdat
     }
 
     fn update_hosts(&self) {
-        let new_hosts = (self.update_func)();
-        if let Ok(new_hosts) = new_hosts {
-            if !new_hosts.is_empty() {
-                self.set_hosts(new_hosts);
+        if let Some(update_func) = &self.update_func {
+            let new_hosts = update_func();
+            if let Ok(new_hosts) = new_hosts {
+                if !new_hosts.is_empty() {
+                    self.set_hosts(new_hosts);
+                }
             }
         }
     }
@@ -88,59 +92,84 @@ impl<UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static> HostsUpdat
     }
 }
 
-/// 域名选择器
-///
-/// 用于提供 API 请求必要的域名，提供自动更新域名和域名请求失败后的惩罚机制
-#[derive(Clone)]
-pub struct HostSelector<
-    UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static,
-    ShouldPunishFn: Fn(&IOError) -> bool,
-> {
-    hosts_updater: Arc<HostsUpdater<UpdateFn>>,
-    should_punish_func: ShouldPunishFn,
+type ShouldPunishFn = Box<dyn Fn(&IOError) -> bool>;
+struct HostPunisher {
+    should_punish_func: Option<ShouldPunishFn>,
     punish_duration: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
 }
 
+impl HostPunisher {
+    #[inline]
+    fn max_seek_times(&self, hosts_count: usize) -> usize {
+        hosts_count * usize::from(self.max_punished_hosts_percent) / 100
+    }
+
+    #[inline]
+    fn is_available(&self, punished_info: &PunishedInfo) -> bool {
+        punished_info.continuous_punished_times <= self.max_punished_times
+            || punished_info.last_punished_at + self.punish_duration < SystemTime::now()
+    }
+
+    #[inline]
+    fn should_punish(&self, error: &IOError) -> bool {
+        if let Some(should_punish_func) = &self.should_punish_func {
+            should_punish_func(error)
+        } else {
+            true
+        }
+    }
+}
+
+/// 域名选择器
+///
+/// 用于提供 API 请求必要的域名，提供自动更新域名和域名请求失败后的惩罚机制
+#[derive(Clone)]
+pub struct HostSelector {
+    hosts_updater: Arc<HostsUpdater>,
+    host_punisher: Arc<HostPunisher>,
+}
+
 /// 域名选择构建器
-pub struct HostSelectorBuilder<
-    UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static,
-    ShouldPunishFn: Fn(&IOError) -> bool,
-> {
+pub struct HostSelectorBuilder {
     hosts: Vec<String>,
-    update_func: UpdateFn,
-    should_punish_func: ShouldPunishFn,
+    update_func: Option<UpdateFn>,
+    should_punish_func: Option<ShouldPunishFn>,
     update_interval: Duration,
     punish_duration: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
 }
 
-impl<
-        UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static,
-        ShouldPunishFn: Fn(&IOError) -> bool,
-    > HostSelectorBuilder<UpdateFn, ShouldPunishFn>
-{
+impl HostSelectorBuilder {
     /// 创建新的域名选择构建器
     /// # Arguments
     /// * `hosts` - 初始域名列表
-    /// * `update_func` - 域名更新回调函数
-    /// * `should_punish_func` - 是否惩罚回调函数
-    pub fn new(
-        hosts: Vec<String>,
-        update_func: UpdateFn,
-        should_punish_func: ShouldPunishFn,
-    ) -> Self {
+    pub fn new(hosts: Vec<String>) -> Self {
         Self {
             hosts,
-            update_func,
-            should_punish_func,
+            update_func: None,
+            should_punish_func: None,
             update_interval: Duration::from_secs(5 * 60),
             punish_duration: Duration::from_secs(30),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
         }
+    }
+
+    /// 设置域名更新回调函数
+    #[inline]
+    pub fn update_callback(mut self, update_func: Option<UpdateFn>) -> Self {
+        self.update_func = update_func;
+        self
+    }
+
+    /// 设置惩罚回调函数
+    #[inline]
+    pub fn should_punish_callback(mut self, should_punish_func: Option<ShouldPunishFn>) -> Self {
+        self.should_punish_func = should_punish_func;
+        self
     }
 
     /// 设置域名更新频率
@@ -177,40 +206,36 @@ impl<
 
     /// 构建域名选择器
     #[inline]
-    pub fn build(self) -> Arc<HostSelector<UpdateFn, ShouldPunishFn>> {
+    pub fn build(self) -> Arc<HostSelector> {
         let hosts_updater = HostsUpdater::new(self.hosts, self.update_func);
 
         HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
 
         let host_selector = Arc::new(HostSelector {
             hosts_updater,
-            should_punish_func: self.should_punish_func,
-            punish_duration: self.punish_duration,
-            max_punished_times: self.max_punished_times,
-            max_punished_hosts_percent: self.max_punished_hosts_percent,
+            host_punisher: Arc::new(HostPunisher {
+                should_punish_func: self.should_punish_func,
+                punish_duration: self.punish_duration,
+                max_punished_times: self.max_punished_times,
+                max_punished_hosts_percent: self.max_punished_hosts_percent,
+            }),
         });
 
         host_selector
     }
 }
 
-impl<
-        UpdateFn: Fn() -> IOResult<Vec<String>> + Sync + Send + 'static,
-        ShouldPunishFn: Fn(&IOError) -> bool,
-    > HostSelector<UpdateFn, ShouldPunishFn>
-{
+impl HostSelector {
     /// 选择一个域名
     pub fn select_host(&self) -> Option<String> {
         let mut current_host = None;
         let hosts = self.hosts_updater.hosts.read().unwrap();
-        for _ in 0..=(hosts.len() * usize::from(self.max_punished_hosts_percent) / 100) {
+        for _ in 0..=self.host_punisher.max_seek_times(hosts.len()) {
             let index = self.hosts_updater.next_index();
             let host = hosts[index % hosts.len()].as_str();
             current_host = Some(host);
             if let Some(punished_info) = self.hosts_updater.hosts_map.get(host) {
-                if punished_info.continuous_punished_times <= self.max_punished_times
-                    || punished_info.last_punished_at + self.punish_duration < SystemTime::now()
-                {
+                if self.host_punisher.is_available(&punished_info) {
                     break;
                 }
             }
@@ -227,7 +252,7 @@ impl<
 
     /// 惩罚一个域名，会由 `should_punish_func` 回调函数决定是否对错误进行惩罚，如果需要惩罚，则相应的惩罚将被记录
     pub fn punish(&self, host: &str, error: &IOError) {
-        if (self.should_punish_func)(error) {
+        if self.host_punisher.should_punish(error) {
             if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
                 punished_info.continuous_punished_times += 1;
                 punished_info.last_punished_at = SystemTime::now();
@@ -250,14 +275,14 @@ mod tests {
                 "http://host2".to_owned(),
                 "http://host3".to_owned(),
             ],
-            || {
+            Some(Box::new(|| {
                 Ok(vec![
                     "http://host1".to_owned(),
                     "http://host2".to_owned(),
                     "http://host4".to_owned(),
                     "http://host5".to_owned(),
                 ])
-            },
+            })),
         );
         assert_eq!(hosts_updater.hosts.read().unwrap().len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
@@ -277,14 +302,14 @@ mod tests {
                 "http://host2".to_owned(),
                 "http://host3".to_owned(),
             ],
-            || {
+            Some(Box::new(|| {
                 Ok(vec![
                     "http://host1".to_owned(),
                     "http://host2".to_owned(),
                     "http://host4".to_owned(),
                     "http://host5".to_owned(),
                 ])
-            },
+            })),
         );
         assert_eq!(hosts_updater.hosts.read().unwrap().len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
@@ -299,57 +324,65 @@ mod tests {
 
     #[test]
     fn test_hosts_selector() {
-        let punished_errs = Mutex::new(Vec::new());
-        let host_selector = HostSelectorBuilder::new(
-            vec![
+        let punished_errs = Arc::new(Mutex::new(Vec::new()));
+        {
+            let host_selector = HostSelectorBuilder::new(vec![
                 "http://host1".to_owned(),
                 "http://host2".to_owned(),
                 "http://host3".to_owned(),
-            ],
-            || Ok(vec![]),
-            |error| {
-                punished_errs.lock().unwrap().push(error.to_string());
-                true
-            },
-        )
-        .punish_duration(Duration::from_millis(500))
-        .max_punished_times(2)
-        .build();
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 1"));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 2"));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
-        host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 6"));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        sleep(Duration::from_millis(500));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 7"));
-        host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 8"));
-        host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 9"));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        host_selector.reward("http://host3");
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-        assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-
-        assert_eq!(punished_errs.into_inner().unwrap().len(), 9);
+            ])
+            .should_punish_callback(Some({
+                let punished_errs = punished_errs.to_owned();
+                Box::new(move |error| {
+                    punished_errs.lock().unwrap().push(error.to_string());
+                    true
+                })
+            }))
+            .punish_duration(Duration::from_millis(500))
+            .max_punished_times(2)
+            .build();
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 1"));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 2"));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
+            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 6"));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            sleep(Duration::from_millis(500));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 7"));
+            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 8"));
+            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 9"));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            host_selector.reward("http://host3");
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+        }
+        assert_eq!(
+            Arc::try_unwrap(punished_errs)
+                .unwrap()
+                .into_inner()
+                .unwrap()
+                .len(),
+            9
+        );
     }
 }
