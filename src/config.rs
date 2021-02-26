@@ -3,6 +3,7 @@ use std::{env, fs, time::Duration};
 use super::{base::credential::Credential, download::RangeReaderBuilder};
 use log::{error, warn};
 use once_cell::sync::Lazy;
+use reqwest::blocking::Client as HTTPClient;
 use serde::Deserialize;
 
 #[derive(Deserialize, Debug)]
@@ -25,8 +26,10 @@ pub struct Config {
     retry: Option<usize>,
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
+    dial_timeout_ms: Option<u64>,
 }
 static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
+pub(super) static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(build_http_client);
 
 /// 判断当前是否已经启用七牛环境
 ///
@@ -34,6 +37,32 @@ static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
 #[inline]
 pub fn is_qiniu_enabled() -> bool {
     QINIU_CONFIG.is_some()
+}
+
+fn build_http_client() -> HTTPClient {
+    let mut base_timeout_ms = 500u64;
+    let mut dial_timeout_ms = 500u64;
+    if let Some(config) = QINIU_CONFIG.as_ref() {
+        if let Some(value) = config.base_timeout_ms {
+            if value > 0 {
+                base_timeout_ms = value;
+            }
+        }
+        if let Some(value) = config.dial_timeout_ms {
+            if value > 0 {
+                dial_timeout_ms = value;
+            }
+        }
+    }
+    let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
+    HTTPClient::builder()
+        .user_agent(user_agent)
+        .connect_timeout(Duration::from_millis(dial_timeout_ms))
+        .timeout(Duration::from_millis(base_timeout_ms))
+        .pool_max_idle_per_host(5)
+        .connection_verbose(true)
+        .build()
+        .expect("Failed to build Reqwest Client")
 }
 
 fn load_config() -> Option<Config> {
