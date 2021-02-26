@@ -15,6 +15,7 @@ use std::{
 struct PunishedInfo {
     last_punished_at: SystemTime,
     continuous_punished_times: usize,
+    timeout_power: usize,
 }
 
 impl Default for PunishedInfo {
@@ -22,6 +23,7 @@ impl Default for PunishedInfo {
         Self {
             last_punished_at: SystemTime::UNIX_EPOCH,
             continuous_punished_times: 0,
+            timeout_power: 0,
         }
     }
 }
@@ -96,6 +98,7 @@ type ShouldPunishFn = Box<dyn Fn(&IOError) -> bool + Send + Sync + 'static>;
 struct HostPunisher {
     should_punish_func: Option<ShouldPunishFn>,
     punish_duration: Duration,
+    base_timeout: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
 }
@@ -109,7 +112,16 @@ impl HostPunisher {
     #[inline]
     fn is_available(&self, punished_info: &PunishedInfo) -> bool {
         punished_info.continuous_punished_times <= self.max_punished_times
-            || punished_info.last_punished_at + self.punish_duration < SystemTime::now()
+    }
+
+    #[inline]
+    fn is_punishment_expired(&self, punished_info: &PunishedInfo) -> bool {
+        punished_info.last_punished_at + self.punish_duration < SystemTime::now()
+    }
+
+    #[inline]
+    fn timeout(&self, punished_info: &PunishedInfo) -> Duration {
+        self.base_timeout * (1 << punished_info.timeout_power)
     }
 
     #[inline]
@@ -134,6 +146,7 @@ pub(super) struct HostSelectorBuilder {
     should_punish_func: Option<ShouldPunishFn>,
     update_interval: Duration,
     punish_duration: Duration,
+    base_timeout: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
 }
@@ -146,6 +159,7 @@ impl HostSelectorBuilder {
             should_punish_func: None,
             update_interval: Duration::from_secs(5 * 60),
             punish_duration: Duration::from_secs(30),
+            base_timeout: Duration::from_millis(500),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
         }
@@ -179,6 +193,12 @@ impl HostSelectorBuilder {
     }
 
     #[inline]
+    pub(super) fn base_timeout(mut self, timeout: Duration) -> Self {
+        self.base_timeout = timeout;
+        self
+    }
+
+    #[inline]
     pub(super) fn max_punished_times(mut self, times: usize) -> Self {
         self.max_punished_times = times;
         self
@@ -204,11 +224,17 @@ impl HostSelectorBuilder {
             host_punisher: Arc::new(HostPunisher {
                 should_punish_func: self.should_punish_func,
                 punish_duration: self.punish_duration,
+                base_timeout: self.base_timeout,
                 max_punished_times: self.max_punished_times,
                 max_punished_hosts_percent: self.max_punished_hosts_percent,
             }),
         }
     }
+}
+
+pub(super) struct HostInfo {
+    pub(super) host: String,
+    pub(super) timeout: Duration,
 }
 
 impl HostSelector {
@@ -217,20 +243,41 @@ impl HostSelector {
         HostSelectorBuilder::new(hosts)
     }
 
-    pub(super) fn select_host(&self) -> String {
-        let mut current_host = None;
+    pub(super) fn select_host(&self) -> HostInfo {
+        #[derive(Debug)]
+        struct CurrentHostInfo<'a> {
+            host: &'a str,
+            timeout: Duration,
+        }
+        let mut current_host_info = None;
+
         let hosts = self.hosts_updater.hosts.read().unwrap();
         for _ in 0..=self.host_punisher.max_seek_times(hosts.len()) {
             let index = self.hosts_updater.next_index();
             let host = hosts[index % hosts.len()].as_str();
-            current_host = Some(host);
+            current_host_info = Some(CurrentHostInfo {
+                host,
+                timeout: self.host_punisher.base_timeout,
+            });
             if let Some(punished_info) = self.hosts_updater.hosts_map.get(host) {
+                if self.host_punisher.is_punishment_expired(&punished_info) {
+                    break;
+                }
+                current_host_info = Some(CurrentHostInfo {
+                    host,
+                    timeout: self.host_punisher.timeout(&punished_info),
+                });
                 if self.host_punisher.is_available(&punished_info) {
                     break;
                 }
             }
         }
-        current_host.map(|h| h.to_owned()).unwrap()
+        current_host_info
+            .map(|h| HostInfo {
+                host: h.host.to_owned(),
+                timeout: h.timeout,
+            })
+            .unwrap()
     }
 
     pub(super) fn reward(&self, host: &str) {
@@ -248,6 +295,12 @@ impl HostSelector {
             true
         } else {
             false
+        }
+    }
+
+    pub(super) fn increase_timeout_power(&self, host: &str) {
+        if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
+            punished_info.timeout_power += 1;
         }
     }
 }
@@ -330,42 +383,97 @@ mod tests {
                 })
             }))
             .punish_duration(Duration::from_millis(500))
+            .base_timeout(Duration::from_millis(100))
             .max_punished_times(2)
             .build();
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
+            host_selector.increase_timeout_power("http://host1");
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 1"));
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 2"));
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
+            host_selector.increase_timeout_power("http://host2");
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
+            host_selector.increase_timeout_power("http://host2");
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 6"));
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(400));
+            }
+            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
             sleep(Duration::from_millis(500));
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            host_selector.increase_timeout_power("http://host3");
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 7"));
+            host_selector.increase_timeout_power("http://host3");
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 8"));
+            host_selector.increase_timeout_power("http://host3");
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 9"));
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
             host_selector.reward("http://host3");
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
-            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
+            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
         }
         assert_eq!(
             Arc::try_unwrap(punished_errs)

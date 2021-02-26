@@ -24,6 +24,7 @@ pub struct Config {
     private: Option<bool>,
     retry: Option<usize>,
     punish_time_s: Option<u64>,
+    base_timeout_ms: Option<u64>,
 }
 static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
 
@@ -87,6 +88,12 @@ pub(super) fn build_range_reader_builder_from_config(
     if let Some(punish_time_s) = config.punish_time_s {
         if punish_time_s > 0 {
             builder = builder.punish_duration(Duration::from_secs(punish_time_s));
+        }
+    }
+
+    if let Some(base_timeout_ms) = config.base_timeout_ms {
+        if base_timeout_ms > 0 {
+            builder = builder.base_timeout(Duration::from_millis(base_timeout_ms));
         }
     }
 
