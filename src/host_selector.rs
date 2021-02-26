@@ -92,7 +92,7 @@ impl HostsUpdater {
     }
 }
 
-type ShouldPunishFn = Box<dyn Fn(&IOError) -> bool>;
+type ShouldPunishFn = Box<dyn Fn(&IOError) -> bool + Send + Sync + 'static>;
 struct HostPunisher {
     should_punish_func: Option<ShouldPunishFn>,
     punish_duration: Duration,
@@ -122,17 +122,13 @@ impl HostPunisher {
     }
 }
 
-/// 域名选择器
-///
-/// 用于提供 API 请求必要的域名，提供自动更新域名和域名请求失败后的惩罚机制
 #[derive(Clone)]
-pub struct HostSelector {
+pub(super) struct HostSelector {
     hosts_updater: Arc<HostsUpdater>,
     host_punisher: Arc<HostPunisher>,
 }
 
-/// 域名选择构建器
-pub struct HostSelectorBuilder {
+pub(super) struct HostSelectorBuilder {
     hosts: Vec<String>,
     update_func: Option<UpdateFn>,
     should_punish_func: Option<ShouldPunishFn>,
@@ -143,10 +139,7 @@ pub struct HostSelectorBuilder {
 }
 
 impl HostSelectorBuilder {
-    /// 创建新的域名选择构建器
-    /// # Arguments
-    /// * `hosts` - 初始域名列表
-    pub fn new(hosts: Vec<String>) -> Self {
+    pub(super) fn new(hosts: Vec<String>) -> Self {
         Self {
             hosts,
             update_func: None,
@@ -158,60 +151,55 @@ impl HostSelectorBuilder {
         }
     }
 
-    /// 设置域名更新回调函数
     #[inline]
-    pub fn update_callback(mut self, update_func: Option<UpdateFn>) -> Self {
+    pub(super) fn update_callback(mut self, update_func: Option<UpdateFn>) -> Self {
         self.update_func = update_func;
         self
     }
 
-    /// 设置惩罚回调函数
     #[inline]
-    pub fn should_punish_callback(mut self, should_punish_func: Option<ShouldPunishFn>) -> Self {
+    pub(super) fn should_punish_callback(
+        mut self,
+        should_punish_func: Option<ShouldPunishFn>,
+    ) -> Self {
         self.should_punish_func = should_punish_func;
         self
     }
 
-    /// 设置域名更新频率
     #[inline]
-    pub fn update_interval(mut self, interval: Duration) -> Self {
+    pub(super) fn update_interval(mut self, interval: Duration) -> Self {
         self.update_interval = interval;
         self
     }
 
-    /// 设置域名惩罚时长
     #[inline]
-    pub fn punish_duration(mut self, duration: Duration) -> Self {
+    pub(super) fn punish_duration(mut self, duration: Duration) -> Self {
         self.punish_duration = duration;
         self
     }
 
-    /// 设置最大被惩罚次数
-    ///
-    /// 一旦一个域名的被惩罚次数超过限制，则域名选择器不会选择该域名，除非被惩罚的域名比例超过上限，或惩罚时长超过指定时长
     #[inline]
-    pub fn max_punished_times(mut self, times: usize) -> Self {
+    pub(super) fn max_punished_times(mut self, times: usize) -> Self {
         self.max_punished_times = times;
         self
     }
 
-    /// 设置被惩罚的域名最大比例
-    ///
-    /// 域名选择器在搜索域名时，一旦被跳过的域名比例大于该值，则下一个域名将被选中，不管该域名是否也被惩罚。一旦该域名成功，则惩罚将立刻被取消
     #[inline]
-    pub fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
+    pub(super) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
         self.max_punished_hosts_percent = percent;
         self
     }
 
-    /// 构建域名选择器
     #[inline]
-    pub fn build(self) -> Arc<HostSelector> {
+    pub(super) fn build(self) -> HostSelector {
+        let auto_update_enabled = self.update_func.is_some();
         let hosts_updater = HostsUpdater::new(self.hosts, self.update_func);
 
-        HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
+        if auto_update_enabled {
+            HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
+        }
 
-        let host_selector = Arc::new(HostSelector {
+        HostSelector {
             hosts_updater,
             host_punisher: Arc::new(HostPunisher {
                 should_punish_func: self.should_punish_func,
@@ -219,15 +207,17 @@ impl HostSelectorBuilder {
                 max_punished_times: self.max_punished_times,
                 max_punished_hosts_percent: self.max_punished_hosts_percent,
             }),
-        });
-
-        host_selector
+        }
     }
 }
 
 impl HostSelector {
-    /// 选择一个域名
-    pub fn select_host(&self) -> Option<String> {
+    #[inline]
+    pub(super) fn builder(hosts: Vec<String>) -> HostSelectorBuilder {
+        HostSelectorBuilder::new(hosts)
+    }
+
+    pub(super) fn select_host(&self) -> String {
         let mut current_host = None;
         let hosts = self.hosts_updater.hosts.read().unwrap();
         for _ in 0..=self.host_punisher.max_seek_times(hosts.len()) {
@@ -240,23 +230,24 @@ impl HostSelector {
                 }
             }
         }
-        current_host.map(|h| h.to_owned())
+        current_host.map(|h| h.to_owned()).unwrap()
     }
 
-    /// 奖励一个域名，将会移除该域名先前全部的惩罚
-    pub fn reward(&self, host: &str) {
+    pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
             *punished_info = Default::default();
         }
     }
 
-    /// 惩罚一个域名，会由 `should_punish_func` 回调函数决定是否对错误进行惩罚，如果需要惩罚，则相应的惩罚将被记录
-    pub fn punish(&self, host: &str, error: &IOError) {
+    pub(super) fn punish(&self, host: &str, error: &IOError) -> bool {
         if self.host_punisher.should_punish(error) {
             if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
                 punished_info.continuous_punished_times += 1;
                 punished_info.last_punished_at = SystemTime::now();
             }
+            true
+        } else {
+            false
         }
     }
 }
@@ -341,40 +332,40 @@ mod tests {
             .punish_duration(Duration::from_millis(500))
             .max_punished_times(2)
             .build();
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 1"));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 2"));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 6"));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
             sleep(Duration::from_millis(500));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 7"));
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 8"));
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 9"));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
             host_selector.reward("http://host3");
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host3".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host1".to_owned()));
-            assert_eq!(host_selector.select_host(), Some("http://host2".to_owned()));
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host3".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host1".to_owned());
+            assert_eq!(host_selector.select_host(), "http://host2".to_owned());
         }
         assert_eq!(
             Arc::try_unwrap(punished_errs)

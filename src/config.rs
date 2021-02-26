@@ -22,6 +22,8 @@ pub struct Config {
 
     sim: Option<bool>,
     private: Option<bool>,
+    retry: Option<usize>,
+    punish_time_s: Option<u64>,
 }
 static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
 
@@ -61,25 +63,41 @@ fn load_config() -> Option<Config> {
 }
 
 pub(super) fn build_range_reader_builder_from_config(
-    key: &str,
+    key: String,
     config: &Config,
 ) -> RangeReaderBuilder {
-    RangeReaderBuilder::new(
-        &config.bucket,
+    let mut builder = RangeReaderBuilder::new(
+        config.bucket.to_owned(),
         key,
-        config.uc_urls.as_deref(),
-        config.io_urls.as_ref(),
-        &Credential::new(&config.access_key, &config.secret_key),
-        !config.sim.unwrap_or(false),
-        config
-            .private
-            .unwrap_or(false)
-            .then(|| Duration::from_secs(3600 * 24)),
-        5,
-    )
+        Credential::new(&config.access_key, &config.secret_key),
+        config.io_urls.to_owned(),
+    );
+
+    if let Some(uc_urls) = &config.uc_urls {
+        if !uc_urls.is_empty() {
+            builder = builder.uc_urls(uc_urls.to_owned());
+        }
+    }
+    if let Some(retry) = config.retry {
+        if retry > 0 {
+            builder = builder.io_tries(retry);
+        }
+    }
+
+    if let Some(punish_time_s) = config.punish_time_s {
+        if punish_time_s > 0 {
+            builder = builder.punish_duration(Duration::from_secs(punish_time_s));
+        }
+    }
+
+    if let Some(sim) = config.sim {
+        builder = builder.use_getfile_api(!sim);
+    }
+
+    builder
 }
 
-pub(super) fn build_range_reader_builder_from_env(key: &str) -> Option<RangeReaderBuilder> {
+pub(super) fn build_range_reader_builder_from_env(key: String) -> Option<RangeReaderBuilder> {
     QINIU_CONFIG
         .as_ref()
         .map(|qiniu_config| build_range_reader_builder_from_config(key, qiniu_config))

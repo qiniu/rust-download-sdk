@@ -1,8 +1,7 @@
-use super::HTTP_CLIENT;
+use super::{host_selector::HostSelector, HTTP_CLIENT};
 use dashmap::DashMap;
 use directories::BaseDirs;
 use once_cell::sync::Lazy;
-use rand::prelude::*;
 use reqwest::StatusCode;
 use serde::{
     de::{Error as DeError, Visitor},
@@ -105,23 +104,41 @@ static CACHE_INIT: Lazy<()> = Lazy::new(|| {
     load_cache().ok();
 });
 
-pub(super) fn query_for_io_urls(
-    ak: &str,
-    bucket: &str,
-    uc_urls: &[String],
-    use_https: bool,
-) -> IOResult<Vec<String>> {
-    Lazy::force(&CACHE_INIT);
+#[derive(Clone)]
+pub(super) struct HostsQuerier {
+    uc_selector: HostSelector,
+    uc_tries: usize,
+}
 
-    let response_body = query_for_domains(ak, bucket, uc_urls)?;
-    Ok(response_body
-        .hosts
-        .first()
-        .expect("No host in uc query v4 response body")
-        .io
-        .domains
-        .iter()
-        .map(|domain| {
+impl HostsQuerier {
+    #[inline]
+    pub(super) fn new(uc_selector: HostSelector, uc_tries: usize) -> Self {
+        Self {
+            uc_selector,
+            uc_tries,
+        }
+    }
+
+    pub(super) fn query_for_io_urls(
+        &self,
+        ak: &str,
+        bucket: &str,
+        use_https: bool,
+    ) -> IOResult<Vec<String>> {
+        Lazy::force(&CACHE_INIT);
+
+        let response_body = self.query_for_domains(ak, bucket)?;
+        return Ok(response_body
+            .hosts
+            .first()
+            .expect("No host in uc query v4 response body")
+            .io
+            .domains
+            .iter()
+            .map(|domain| normalize_domain(domain, use_https))
+            .collect());
+
+        fn normalize_domain(domain: &str, use_https: bool) -> String {
             if domain.contains("://") {
                 domain.to_string()
             } else if use_https {
@@ -129,102 +146,118 @@ pub(super) fn query_for_io_urls(
             } else {
                 "http://".to_owned() + domain
             }
-        })
-        .collect())
-}
-
-fn query_for_domains(ak: &str, bucket: &str, uc_urls: &[String]) -> IOResult<ResponseBody> {
-    let cache_key = CacheKey::new(ak.into(), bucket.into());
-
-    let mut modified = false;
-    let cache_value = CACHE_MAP
-        .entry(cache_key.to_owned())
-        .or_try_insert_with(|| {
-            let result = query_for_domains_without_cache(ak, bucket, uc_urls);
-            if result.is_ok() {
-                modified = true;
-            }
-            result
-        })?;
-
-    if cache_value.cache_deadline < SystemTime::now() {
-        let ak = ak.to_owned();
-        let bucket = bucket.to_owned();
-        let uc_urls = uc_urls.to_owned();
-        spawn(move || {
-            let mut modified = false;
-            CACHE_MAP.entry(cache_key).and_modify(|cache_value| {
-                if cache_value.cache_deadline < SystemTime::now() {
-                    if let Ok(new_cache_value) =
-                        query_for_domains_without_cache(ak, bucket, &uc_urls)
-                    {
-                        *cache_value = new_cache_value;
-                        modified = true;
-                    }
-                }
-            });
-            if modified {
-                let _ = save_cache();
-            }
-        });
-    } else if modified {
-        spawn(move || {
-            let _ = save_cache();
-        });
+        }
     }
 
-    Ok(cache_value.cached_response_body.to_owned())
+    fn query_for_domains(&self, ak: &str, bucket: &str) -> IOResult<ResponseBody> {
+        let cache_key = CacheKey::new(ak.into(), bucket.into());
+
+        let mut modified = false;
+        let cache_value = CACHE_MAP
+            .entry(cache_key.to_owned())
+            .or_try_insert_with(|| {
+                let result =
+                    query_for_domains_without_cache(ak, bucket, &self.uc_selector, self.uc_tries);
+                if result.is_ok() {
+                    modified = true;
+                }
+                result
+            })?;
+
+        if cache_value.cache_deadline < SystemTime::now() {
+            let ak = ak.to_owned();
+            let bucket = bucket.to_owned();
+            let uc_selector = self.uc_selector.to_owned();
+            let uc_tries = self.uc_tries;
+            spawn(move || {
+                let mut modified = false;
+                CACHE_MAP.entry(cache_key).and_modify(|cache_value| {
+                    if cache_value.cache_deadline < SystemTime::now() {
+                        if let Ok(new_cache_value) =
+                            query_for_domains_without_cache(ak, bucket, &uc_selector, uc_tries)
+                        {
+                            *cache_value = new_cache_value;
+                            modified = true;
+                        }
+                    }
+                });
+                if modified {
+                    let _ = save_cache();
+                }
+            });
+        } else if modified {
+            spawn(move || {
+                let _ = save_cache();
+            });
+        }
+
+        Ok(cache_value.cached_response_body.to_owned())
+    }
 }
 
 fn query_for_domains_without_cache(
     ak: impl AsRef<str>,
     bucket: impl AsRef<str>,
-    uc_urls: &[String],
+    uc_selector: &HostSelector,
+    uc_tries: usize,
 ) -> IOResult<CacheValue> {
-    let mut error: Option<IOError> = None;
-    for _ in 0..10 {
+    return query_with_retry(uc_selector, uc_tries, |host| {
         let url = Url::parse_with_params(
-            &format!(
-                "{}/v4/query",
-                uc_urls
-                    .choose(&mut thread_rng())
-                    .expect("uc_urls must not be empty")
-            ),
+            &format!("{}/v4/query", host),
             &[("ak", ak.as_ref()), ("bucket", bucket.as_ref())],
         )
-        .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
+        .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
 
-        let response_result: IOResult<ResponseBody> = HTTP_CLIENT
+        HTTP_CLIENT
             .get(&url.to_string())
             .send()
-            .map_err(|err| IOError::new(IOErrorKind::Other, err))
+            .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
             .and_then(|resp| {
                 let code = resp.status();
                 if code != StatusCode::OK {
                     return Err(IOError::new(IOErrorKind::Other, "Status code is not 200"));
                 }
                 resp.json::<ResponseBody>()
-                    .map_err(|err| IOError::new(IOErrorKind::Other, err))
-            });
-        match response_result {
-            Ok(response_body) => {
-                let min_ttl = response_body
+                    .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
+            })
+            .map(|body| {
+                let min_ttl = body
                     .hosts
                     .iter()
                     .map(|host| host.ttl)
                     .min()
                     .expect("No host in uc query v4 response body");
-                return Ok(CacheValue {
-                    cached_response_body: response_body,
+                CacheValue {
+                    cached_response_body: body,
                     cache_deadline: SystemTime::now() + Duration::from_secs(min_ttl),
-                });
-            }
-            Err(err) => {
-                error = Some(err);
+                }
+            })
+    });
+
+    fn query_with_retry<T>(
+        uc_selector: &HostSelector,
+        tries: usize,
+        for_each_host: impl Fn(&str) -> IOResult<T>,
+    ) -> IOResult<T> {
+        let mut last_error = None;
+        for _ in 0..tries {
+            let host = uc_selector.select_host();
+            match for_each_host(&host) {
+                Ok(response) => {
+                    uc_selector.reward(&host);
+                    return Ok(response);
+                }
+                Err(err) => {
+                    let punished = uc_selector.punish(&host, &err);
+                    if !punished {
+                        return Err(err);
+                    }
+                    last_error = Some(err);
+                }
             }
         }
+        Err(last_error.expect("No UC tries error"))
     }
-    Err(error.expect("No tries error"))
 }
 
 fn load_cache() -> IOResult<()> {
@@ -271,7 +304,7 @@ fn save_cache() -> IOResult<()> {
 }
 
 #[cfg(test)]
-fn clear_queryers_cache() -> IOResult<()> {
+fn clear_cache() -> IOResult<()> {
     let cache_file_path = CACHE_DIR.join("query-cache.json");
     std::fs::remove_file(&cache_file_path)
 }
@@ -320,7 +353,7 @@ mod tests {
         env_logger::try_init().ok();
 
         CACHE_MAP.clear();
-        let _ = clear_queryers_cache();
+        let _ = clear_cache();
 
         const ACCESS_KEY: &str = "0123456789001234567890";
         const BUCKET_NAME: &str = "test-bucket";
@@ -348,10 +381,11 @@ mod tests {
             });
         starts_with_server!(addr, routes, {
             spawn_blocking(move || -> IOResult<()> {
-                let io_urls = query_for_io_urls(
+                let host_selector =
+                    HostSelector::builder(vec!["http://".to_owned() + &addr.to_string()]).build();
+                let io_urls = HostsQuerier::new(host_selector, 1).query_for_io_urls(
                     ACCESS_KEY,
                     BUCKET_NAME,
-                    &["http://".to_owned() + &addr.to_string()],
                     false,
                 )?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
@@ -367,7 +401,7 @@ mod tests {
         env_logger::try_init().ok();
 
         CACHE_MAP.clear();
-        let _ = clear_queryers_cache();
+        let _ = clear_cache();
 
         const ACCESS_KEY: &str = "0123456789001234567890";
         const BUCKET_NAME: &str = "test-bucket";
@@ -400,32 +434,21 @@ mod tests {
         };
         starts_with_server!(addr, routes, {
             spawn_blocking(move || -> IOResult<()> {
-                let mut io_urls = query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    &["http://".to_owned() + &addr.to_string()],
-                    false,
-                )?;
+                let host_selector =
+                    HostSelector::builder(vec!["http://".to_owned() + &addr.to_string()]).build();
+                let hosts_querier = HostsQuerier::new(host_selector, 1);
+                let mut io_urls =
+                    hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(counter.load(Relaxed), 1);
 
-                io_urls = query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    &["http://".to_owned() + &addr.to_string()],
-                    false,
-                )?;
+                io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(counter.load(Relaxed), 1);
 
                 sleep(Duration::from_secs(1));
 
-                io_urls = query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    &["http://".to_owned() + &addr.to_string()],
-                    false,
-                )?;
+                io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(counter.load(Relaxed), 1);
 
@@ -435,12 +458,7 @@ mod tests {
                 CACHE_MAP.clear();
                 load_cache().ok();
 
-                io_urls = query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    &["http://".to_owned() + &addr.to_string()],
-                    false,
-                )?;
+                io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(counter.load(Relaxed), 2);
 
