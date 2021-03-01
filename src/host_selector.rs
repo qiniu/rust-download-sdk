@@ -213,9 +213,13 @@ impl HostSelectorBuilder {
     #[inline]
     pub(super) fn build(self) -> HostSelector {
         let auto_update_enabled = self.update_func.is_some();
+        let is_hosts_empty = self.hosts.is_empty();
         let hosts_updater = HostsUpdater::new(self.hosts, self.update_func);
 
         if auto_update_enabled {
+            if is_hosts_empty {
+                hosts_updater.update_hosts();
+            }
             HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
         }
 
@@ -336,6 +340,27 @@ mod tests {
         assert!(hosts_updater.hosts_map.get("http://host4").is_some());
         assert!(hosts_updater.hosts_map.get("http://host5").is_some());
         assert!(hosts_updater.hosts_map.get("http://host3").is_none());
+    }
+
+    #[test]
+    fn test_hosts_update() {
+        let host_selector = HostSelectorBuilder::new(vec![])
+            .update_callback(Some(Box::new(|| {
+                Ok(vec![
+                    "http://host1".to_owned(),
+                    "http://host2".to_owned(),
+                    "http://host4".to_owned(),
+                    "http://host5".to_owned(),
+                ])
+            })))
+            .build();
+        assert!([
+            "http://host1".to_owned(),
+            "http://host2".to_owned(),
+            "http://host4".to_owned(),
+            "http://host5".to_owned(),
+        ]
+        .contains(&host_selector.select_host().host))
     }
 
     #[test]
