@@ -3,13 +3,16 @@ name: Run Test Cases
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        toolchain: ['stable', '1.46.0', 'nightly-2020-10-05']
     steps:
       - name: Checkout repo
         uses: actions/checkout@v2
       - uses: actions-rs/toolchain@v1
         with:
           profile: minimal
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
           override: true
       - uses: actions-rs/cargo@v1
         with:
