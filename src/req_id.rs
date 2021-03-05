@@ -2,6 +2,7 @@ use std::{
     convert::TryInto,
     sync::atomic::{AtomicU64, Ordering::Relaxed},
     time::{Duration, SystemTime, UNIX_EPOCH},
+    u64,
 };
 
 static START_TIME: AtomicU64 = AtomicU64::new(0);
