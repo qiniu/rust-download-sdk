@@ -70,6 +70,7 @@ pub fn sign_download_url_with_lifetime(
 }
 
 /// 对象范围下载器
+#[derive(Debug)]
 pub struct RangeReader {
     io_selector: HostSelector,
     credential: Credential,
@@ -80,6 +81,7 @@ pub struct RangeReader {
     private_url_lifetime: Option<Duration>,
 }
 
+#[derive(Debug)]
 /// 对象范围下载构建器
 pub struct RangeReaderBuilder {
     credential: Credential,

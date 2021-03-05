@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
     collections::HashSet,
+    fmt::{Debug, Formatter, Result as FormatResult},
     io::{Error as IOError, Result as IOResult},
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
@@ -94,6 +95,14 @@ impl HostsUpdater {
     }
 }
 
+impl Debug for HostsUpdater {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FormatResult {
+        f.debug_struct("HostsUpdater")
+            .field("hosts_map", &self.hosts_map)
+            .finish()
+    }
+}
+
 type ShouldPunishFn = Box<dyn Fn(&IOError) -> bool + Send + Sync + 'static>;
 struct HostPunisher {
     should_punish_func: Option<ShouldPunishFn>,
@@ -134,7 +143,22 @@ impl HostPunisher {
     }
 }
 
-#[derive(Clone)]
+impl Debug for HostPunisher {
+    fn fmt(&self, f: &mut Formatter<'_>) -> FormatResult {
+        f.debug_struct("HostPunisher")
+            .field("should_punish", &self.should_punish_func.is_some())
+            .field("punish_duration", &self.punish_duration)
+            .field("base_timeout", &self.base_timeout)
+            .field("max_punished_times", &self.max_punished_times)
+            .field(
+                "max_punished_hosts_percent",
+                &self.max_punished_hosts_percent,
+            )
+            .finish()
+    }
+}
+
+#[derive(Debug, Clone)]
 pub(super) struct HostSelector {
     hosts_updater: Arc<HostsUpdater>,
     host_punisher: Arc<HostPunisher>,

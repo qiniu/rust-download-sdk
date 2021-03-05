@@ -5,6 +5,7 @@ use sha1::Sha1;
 use super::base64;
 
 /// 七牛凭证，用于设置 Access Key 和 Secret Key 以访问私有空间的七牛对象
+#[derive(Debug, Clone)]
 pub struct Credential {
     access_key: String,
     secret_key: String,
