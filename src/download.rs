@@ -772,9 +772,9 @@ impl RangeReader {
             use_getfile_api: bool,
         ) -> String {
             let mut url = if use_getfile_api {
-                io_url.to_owned()
-            } else {
                 format!("{}/getfile/{}/{}", io_url, access_key, bucket)
+            } else {
+                io_url.to_owned()
             };
             if url.ends_with("/") && key.starts_with("/") {
                 url.truncate(url.len() - 1);
@@ -922,6 +922,7 @@ mod tests {
             {
                 let downloader =
                     RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                        .use_getfile_api(false)
                         .build();
                 spawn_blocking(move || {
                     let mut buf = [0u8; 6];
@@ -933,6 +934,7 @@ mod tests {
             {
                 let downloader =
                     RangeReader::builder("bucket", "file2", get_credential(), io_urls.to_owned())
+                        .use_getfile_api(false)
                         .build();
                 spawn_blocking(move || {
                     let mut buf = [0u8; 12];
@@ -966,6 +968,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .io_tries(3)
                     .build();
             spawn_blocking(move || {
@@ -999,6 +1002,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             spawn_blocking(move || {
                 let mut buf = [0u8; 5];
@@ -1031,6 +1035,7 @@ mod tests {
             {
                 let downloader =
                     RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                        .use_getfile_api(false)
                         .build();
 
                 spawn_blocking(move || {
@@ -1056,6 +1061,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
@@ -1086,6 +1092,7 @@ mod tests {
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .io_tries(3)
+                    .use_getfile_api(false)
                     .build();
             spawn_blocking(move || {
                 downloader.exist().unwrap_err();
@@ -1116,6 +1123,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             spawn_blocking(move || {
                 downloader.exist().unwrap_err();
@@ -1137,6 +1145,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
@@ -1195,6 +1204,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
@@ -1226,6 +1236,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
@@ -1263,6 +1274,7 @@ mod tests {
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .io_tries(3)
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
@@ -1316,6 +1328,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 5), (5, 5)];
             spawn_blocking(move || {
@@ -1347,6 +1360,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 5), (5, 1)];
             spawn_blocking(move || {
@@ -1380,6 +1394,7 @@ mod tests {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .use_getfile_api(false)
                     .build();
             let ranges = [(0, 4)];
             spawn_blocking(move || {
