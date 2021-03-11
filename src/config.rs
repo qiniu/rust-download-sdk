@@ -1,4 +1,4 @@
-use std::{env, fs, time::Duration};
+use std::{convert::TryInto, env, fs, time::Duration, u64};
 
 use super::{base::credential::Credential, download::RangeReaderBuilder};
 use log::{error, warn};
@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use reqwest::blocking::Client as HTTPClient;
 use serde::Deserialize;
 
+/// 七牛配置信息
 #[derive(Deserialize, Debug)]
 pub struct Config {
     #[serde(alias = "ak")]
@@ -137,4 +138,105 @@ pub(super) fn build_range_reader_builder_from_env(key: String) -> Option<RangeRe
     QINIU_CONFIG
         .as_ref()
         .map(|qiniu_config| build_range_reader_builder_from_config(key, qiniu_config))
+}
+
+impl Config {
+    /// 创建七牛配置信息构建器
+    pub fn builder(
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        bucket: impl Into<String>,
+        io_urls: Vec<String>,
+    ) -> ConfigBuilder {
+        ConfigBuilder::new(access_key, secret_key, bucket, io_urls)
+    }
+}
+
+/// 七牛配置信息构建器
+#[derive(Debug)]
+pub struct ConfigBuilder {
+    inner: Config,
+}
+
+impl ConfigBuilder {
+    /// 创建七牛配置信息构建器
+    pub fn new(
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+        bucket: impl Into<String>,
+        io_urls: Vec<String>,
+    ) -> Self {
+        Self {
+            inner: Config {
+                access_key: access_key.into(),
+                secret_key: secret_key.into(),
+                bucket: bucket.into(),
+                io_urls,
+                uc_urls: None,
+                sim: None,
+                private: None,
+                retry: None,
+                punish_time_s: None,
+                base_timeout_ms: None,
+                dial_timeout_ms: None,
+            },
+        }
+    }
+
+    /// 构建七牛配置信息
+    #[inline]
+    pub fn build(self) -> Config {
+        self.inner
+    }
+
+    /// 配置 UC 服务器域名列表
+    #[inline]
+    pub fn uc_urls(mut self, uc_urls: Option<Vec<String>>) -> Self {
+        self.inner.uc_urls = uc_urls;
+        self
+    }
+
+    /// 是否使用 Getfile API，默认为 true
+    #[inline]
+    pub fn use_getfile_api(mut self, use_getfile_api: Option<bool>) -> Self {
+        self.inner.sim = use_getfile_api.map(|b| !b);
+        self
+    }
+
+    /// 是否使用私有存储空间，默认不使用
+    #[inline]
+    pub fn private(mut self, private: Option<bool>) -> Self {
+        self.inner.private = private;
+        self
+    }
+
+    /// 配置 IO 和 UC 服务器访问重试次数，默认为 10
+    #[inline]
+    pub fn retry(mut self, retry: Option<usize>) -> Self {
+        self.inner.retry = retry;
+        self
+    }
+
+    /// 配置域名访问失败后的惩罚时长，默认为 30 秒
+    #[inline]
+    pub fn punish_duration(mut self, punish_duration: Option<Duration>) -> Self {
+        self.inner.punish_time_s = punish_duration.map(|d| d.as_secs());
+        self
+    }
+
+    /// 配置域名访问的基础超时时长，默认为 500 毫秒
+    #[inline]
+    pub fn base_timeout(mut self, base_timeout: Option<Duration>) -> Self {
+        self.inner.base_timeout_ms =
+            base_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
+
+    /// 配置域名连接的超时时长，默认为 500 毫秒
+    #[inline]
+    pub fn connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
+        self.inner.dial_timeout_ms =
+            connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
 }

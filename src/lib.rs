@@ -15,7 +15,7 @@ mod req_id;
 
 pub use base::credential::Credential;
 use config::HTTP_CLIENT;
-pub use config::{is_qiniu_enabled, Config};
+pub use config::{is_qiniu_enabled, Config, ConfigBuilder};
 pub use download::{
     sign_download_url_with_deadline, sign_download_url_with_lifetime, RangeReader,
     RangeReaderBuilder,
