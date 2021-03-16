@@ -17,7 +17,7 @@ pub struct Config {
     bucket: String,
 
     #[serde(alias = "io_hosts")]
-    io_urls: Vec<String>,
+    io_urls: Option<Vec<String>>,
 
     #[serde(alias = "uc_hosts")]
     uc_urls: Option<Vec<String>>,
@@ -101,7 +101,11 @@ pub(super) fn build_range_reader_builder_from_config(
         config.bucket.to_owned(),
         key,
         Credential::new(&config.access_key, &config.secret_key),
-        config.io_urls.to_owned(),
+        config
+            .io_urls
+            .as_ref()
+            .map(|urls| urls.to_owned())
+            .unwrap_or_default(),
     );
 
     if let Some(uc_urls) = &config.uc_urls {
@@ -146,7 +150,7 @@ impl Config {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
         bucket: impl Into<String>,
-        io_urls: Vec<String>,
+        io_urls: Option<Vec<String>>,
     ) -> ConfigBuilder {
         ConfigBuilder::new(access_key, secret_key, bucket, io_urls)
     }
@@ -164,7 +168,7 @@ impl ConfigBuilder {
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
         bucket: impl Into<String>,
-        io_urls: Vec<String>,
+        io_urls: Option<Vec<String>>,
     ) -> Self {
         Self {
             inner: Config {
