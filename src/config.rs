@@ -31,10 +31,15 @@ pub struct Config {
     #[serde(alias = "uc_hosts")]
     uc_urls: Option<Vec<String>>,
 
+    #[serde(alias = "monitor_hosts")]
+    monitor_urls: Option<Vec<String>>,
+
     sim: Option<bool>,
     normalize_key: Option<bool>,
     private: Option<bool>,
     retry: Option<usize>,
+    dot_interval_s: Option<u64>,
+    max_dot_buffer_size: Option<u64>,
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
@@ -204,9 +209,16 @@ pub(super) fn build_range_reader_builder_from_config(
             builder = builder.uc_urls(uc_urls.to_owned());
         }
     }
+
+    if let Some(monitor_urls) = &config.monitor_urls {
+        if !monitor_urls.is_empty() {
+            builder = builder.monitor_urls(monitor_urls.to_owned());
+        }
+    }
+
     if let Some(retry) = config.retry {
         if retry > 0 {
-            builder = builder.io_tries(retry);
+            builder = builder.io_tries(retry).dot_tries(retry);
         }
     }
 
@@ -220,6 +232,22 @@ pub(super) fn build_range_reader_builder_from_config(
         if base_timeout_ms > 0 {
             builder = builder.base_timeout(Duration::from_millis(base_timeout_ms));
         }
+    }
+
+    if let Some(dot_interval_s) = config.dot_interval_s {
+        if dot_interval_s > 0 {
+            builder = builder.dot_interval(Duration::from_secs(dot_interval_s));
+        }
+    }
+
+    if let Some(max_dot_buffer_size) = config.max_dot_buffer_size {
+        if max_dot_buffer_size > 0 {
+            builder = builder.max_dot_buffer_size(max_dot_buffer_size);
+        }
+    }
+
+    if let Some(true) = config.private {
+        builder = builder.private_url_lifetime(Some(Duration::from_secs(3600)));
     }
 
     if let Some(sim) = config.sim {
@@ -274,6 +302,7 @@ impl ConfigBuilder {
                 bucket: bucket.into(),
                 io_urls,
                 uc_urls: None,
+                monitor_urls: None,
                 sim: None,
                 normalize_key: None,
                 private: None,
@@ -281,6 +310,8 @@ impl ConfigBuilder {
                 punish_time_s: None,
                 base_timeout_ms: None,
                 dial_timeout_ms: None,
+                dot_interval_s: None,
+                max_dot_buffer_size: None,
             },
         }
     }
@@ -295,6 +326,13 @@ impl ConfigBuilder {
     #[inline]
     pub fn uc_urls(mut self, uc_urls: Option<Vec<String>>) -> Self {
         self.inner.uc_urls = uc_urls;
+        self
+    }
+
+    /// 配置监控服务器域名列表，如果不配置或配置为空，则不会启用打点功能
+    #[inline]
+    pub fn monitor_urls(mut self, monitor_urls: Option<Vec<String>>) -> Self {
+        self.inner.monitor_urls = monitor_urls;
         self
     }
 
@@ -348,6 +386,20 @@ impl ConfigBuilder {
             connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
         self
     }
+
+    /// 设置打点记录上传频率，默认为 10 秒
+    #[inline]
+    pub fn dot_interval(mut self, dot_interval: Option<Duration>) -> Self {
+        self.inner.dot_interval_s = dot_interval.map(|d| d.as_secs());
+        self
+    }
+
+    /// 设置打点记录本地缓存文件尺寸上限，默认为 1 MB
+    #[inline]
+    pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: Option<u64>) -> Self {
+        self.inner.max_dot_buffer_size = max_dot_buffer_size;
+        self
+    }
 }
 
 #[cfg(test)]
@@ -372,10 +424,13 @@ mod tests {
             bucket: "test-bucket-1".into(),
             io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
             uc_urls: Default::default(),
+            monitor_urls: Default::default(),
             sim: Default::default(),
             normalize_key: Default::default(),
             private: Default::default(),
             retry: Default::default(),
+            dot_interval_s: Default::default(),
+            max_dot_buffer_size: Default::default(),
             punish_time_s: Default::default(),
             base_timeout_ms: Default::default(),
             dial_timeout_ms: Default::default(),

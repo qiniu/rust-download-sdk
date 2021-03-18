@@ -4,6 +4,7 @@ use super::{
         build_range_reader_builder_from_config, build_range_reader_builder_from_env,
         on_config_updated, Config,
     },
+    dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
@@ -26,7 +27,7 @@ use std::{
     result::Result,
     sync::{Arc, RwLock},
     thread::sleep,
-    time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
@@ -84,6 +85,7 @@ pub struct RangeReader {
 #[derive(Debug)]
 struct RangeReaderInner {
     io_selector: HostSelector,
+    dotter: Dotter,
     credential: Credential,
     bucket: String,
     tries: usize,
@@ -100,8 +102,10 @@ pub struct RangeReaderBuilder {
     key: String,
     io_urls: Vec<String>,
     uc_urls: Vec<String>,
+    monitor_urls: Vec<String>,
     io_tries: usize,
     uc_tries: usize,
+    dot_tries: usize,
     update_interval: Duration,
     punish_duration: Duration,
     base_timeout: Duration,
@@ -111,6 +115,8 @@ pub struct RangeReaderBuilder {
     normalize_key: bool,
     private_url_lifetime: Option<Duration>,
     use_https: bool,
+    dot_interval: Option<Duration>,
+    max_dot_buffer_size: Option<u64>,
 }
 
 impl RangeReaderBuilder {
@@ -134,8 +140,10 @@ impl RangeReaderBuilder {
             credential,
             io_urls,
             uc_urls: vec![],
+            monitor_urls: vec![],
             io_tries: 10,
             uc_tries: 10,
+            dot_tries: 10,
             update_interval: Duration::from_secs(60),
             punish_duration: Duration::from_secs(30 * 60),
             base_timeout: Duration::from_millis(3000),
@@ -145,6 +153,8 @@ impl RangeReaderBuilder {
             normalize_key: false,
             private_url_lifetime: None,
             use_https: false,
+            dot_interval: None,
+            max_dot_buffer_size: None,
         }
     }
 
@@ -152,6 +162,13 @@ impl RangeReaderBuilder {
     #[inline]
     pub fn uc_urls(mut self, urls: Vec<String>) -> Self {
         self.uc_urls = urls;
+        self
+    }
+
+    /// 设置七牛监控服务器 URL 列表
+    #[inline]
+    pub fn monitor_urls(mut self, urls: Vec<String>) -> Self {
+        self.monitor_urls = urls;
         self
     }
 
@@ -166,6 +183,13 @@ impl RangeReaderBuilder {
     #[inline]
     pub fn uc_tries(mut self, tries: usize) -> Self {
         self.uc_tries = tries;
+        self
+    }
+
+    /// 设置打点记录上传的最大尝试次数
+    #[inline]
+    pub fn dot_tries(mut self, tries: usize) -> Self {
+        self.dot_tries = tries;
         self
     }
 
@@ -229,6 +253,20 @@ impl RangeReaderBuilder {
         self
     }
 
+    /// 设置打点记录上传频率
+    #[inline]
+    pub fn dot_interval(mut self, dot_interval: Duration) -> Self {
+        self.dot_interval = Some(dot_interval);
+        self
+    }
+
+    /// 设置打点记录本地缓存文件尺寸上限
+    #[inline]
+    pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
+        self.max_dot_buffer_size = Some(max_dot_buffer_size);
+        self
+    }
+
     /// 设置是否使用 HTTPS 协议来访问 IO 服务器
     #[inline]
     pub fn use_https(mut self, use_https: bool) -> Self {
@@ -244,6 +282,19 @@ impl RangeReaderBuilder {
     }
 
     fn build_inner_and_key(self) -> (Arc<RangeReaderInner>, String) {
+        let dotter = Dotter::new(
+            self.credential.to_owned(),
+            self.bucket.to_owned(),
+            self.monitor_urls,
+            self.dot_interval,
+            self.max_dot_buffer_size,
+            Some(self.dot_tries),
+            Some(self.punish_duration),
+            Some(self.max_punished_times),
+            Some(self.max_punished_hosts_percent),
+            Some(self.base_timeout),
+        );
+
         let io_querier = if self.uc_urls.is_empty() {
             None
         } else {
@@ -256,6 +307,7 @@ impl RangeReaderBuilder {
                     .base_timeout(self.base_timeout)
                     .build(),
                 self.uc_tries,
+                dotter.to_owned(),
             ))
         };
         let access_key = self.credential.access_key().to_owned();
@@ -283,6 +335,7 @@ impl RangeReaderBuilder {
         (
             Arc::new(RangeReaderInner {
                 io_selector,
+                dotter,
                 credential: self.credential,
                 bucket: self.bucket,
                 tries: self.io_tries,
@@ -379,6 +432,7 @@ impl ReadAt for RangeReader {
 
         self.with_retries(
             Method::GET,
+            ApiName::RangeReaderReadAt,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_at url: {}, range: {}",
@@ -447,6 +501,7 @@ impl RangeReader {
 
         return self.with_retries(
             Method::GET,
+            ApiName::RangeReaderReadMultiRanges,
             |tries, http_request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_multi_ranges url: {}, range: {:?}",
@@ -630,6 +685,7 @@ impl RangeReader {
     pub fn exist(&self) -> IOResult<bool> {
         self.with_retries(
             Method::HEAD,
+            ApiName::RangeReaderExist,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] exist url: {}", tries, download_url);
                 let result = request_builder
@@ -667,6 +723,7 @@ impl RangeReader {
     pub fn file_size(&self) -> IOResult<u64> {
         self.with_retries(
             Method::HEAD,
+            ApiName::RangeReaderFileSize,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] file_size url: {}", tries, download_url);
                 let result = request_builder
@@ -716,6 +773,7 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
+            ApiName::RangeReaderDownloadTo,
             |tries, mut request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] download_to url: {}, start_from: {}",
@@ -780,6 +838,7 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
+            ApiName::RangeReaderReadLastBytes,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_last_bytes url: {}, len: {}",
@@ -852,10 +911,12 @@ impl RangeReader {
     fn with_retries<T>(
         &self,
         method: Method,
+        api_name: ApiName,
         mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str, usize) -> IOResult<T>,
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
-        let now = SystemTime::now();
+        let begin_at = SystemTime::now();
+        let begin_at_instant = Instant::now();
         assert!(self.inner.tries > 0);
 
         for tries in 0..self.inner.tries {
@@ -875,11 +936,12 @@ impl RangeReader {
                 self.inner.private_url_lifetime,
                 &self.inner.credential,
             );
+            let request_begin_at_instant = Instant::now();
             let request_builder = HTTP_CLIENT
                 .read()
                 .unwrap()
                 .request(method.to_owned(), download_url.to_owned())
-                .header(REQUEST_ID_HEADER, get_req_id(now, tries))
+                .header(REQUEST_ID_HEADER, get_req_id(begin_at, tries))
                 .timeout(chosen_io_info.timeout);
             match for_each_url(
                 tries,
@@ -890,12 +952,42 @@ impl RangeReader {
             ) {
                 Ok(result) => {
                     self.inner.io_selector.reward(&chosen_io_info.host);
+                    self.inner
+                        .dotter
+                        .dot(DotType::Sdk, api_name, true, begin_at_instant.elapsed())
+                        .ok();
+                    self.inner
+                        .dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::IoGetfile,
+                            true,
+                            request_begin_at_instant.elapsed(),
+                        )
+                        .ok();
                     return Ok(result);
                 }
                 Err(err) => {
-                    let punished = self.inner.io_selector.punish(&chosen_io_info.host, &err);
+                    let punished = self.inner.io_selector.punish(
+                        &chosen_io_info.host,
+                        &err,
+                        &self.inner.dotter,
+                    );
+                    self.inner
+                        .dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::IoGetfile,
+                            false,
+                            request_begin_at_instant.elapsed(),
+                        )
+                        .ok();
                     if !punished || last_try {
                         final_error(&err, download_url.as_str());
+                        self.inner
+                            .dotter
+                            .dot(DotType::Sdk, api_name, false, begin_at_instant.elapsed())
+                            .ok();
                         return Err(err);
                     }
                 }
@@ -1004,8 +1096,14 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use futures::channel::oneshot::channel;
+    use super::{
+        super::{
+            cache_dir_path_of,
+            dot::{DotRecordKey, DotRecords, DotRecordsDashMap},
+        },
+        *,
+    };
+    use futures::{channel::oneshot::channel, future::join};
     use multipart::client::lazy::Multipart;
     use std::{
         boxed::Box,
@@ -1017,10 +1115,14 @@ mod tests {
             Arc,
         },
     };
-    use tokio::task::{spawn, spawn_blocking};
+    use tokio::{
+        task::{spawn, spawn_blocking},
+        time::delay_for,
+    };
     use warp::{
         header,
-        http::{HeaderValue, StatusCode},
+        http::{header::AUTHORIZATION, HeaderValue, StatusCode},
+        hyper::Body,
         path,
         reply::Response,
         Filter,
@@ -1038,6 +1140,38 @@ mod tests {
             tx.send(()).ok();
             handler.await.ok();
         }};
+        ($uc_addr:ident, $monitor_addr:ident, $uc_routes:ident, $records_map:ident, $code:block) => {{
+            let (uc_tx, uc_rx) = channel();
+            let (monitor_tx, monitor_rx) = channel();
+            let ($uc_addr, uc_server) = warp::serve($uc_routes).bind_with_graceful_shutdown(
+                ([127, 0, 0, 1], 0),
+                async move {
+                    uc_rx.await.ok();
+                },
+            );
+            let $records_map = Arc::new(DotRecordsDashMap::default());
+            let monitor_routes = {
+                let records_map = $records_map.to_owned();
+                path!("v1" / "stat")
+                    .and(warp::header::value(AUTHORIZATION.as_str()))
+                    .and(warp::body::json())
+                    .map(move |authorization: HeaderValue, records: DotRecords| {
+                        assert!(authorization.to_str().unwrap().starts_with("UpToken "));
+                        records_map.merge_with_records(records);
+                        Response::new(Body::empty())
+                    })
+            };
+            let ($monitor_addr, monitor_server) = warp::serve(monitor_routes)
+                .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
+                    monitor_rx.await.ok();
+                });
+            let uc_handler = spawn(uc_server);
+            let monitor_handler = spawn(monitor_server);
+            $code;
+            uc_tx.send(()).ok();
+            monitor_tx.send(()).ok();
+            let _ = join(uc_handler, monitor_handler).await;
+        }};
     }
 
     #[inline]
@@ -1048,8 +1182,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_at() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
-        let routes = {
+        let io_routes = {
             let action_1 = path!("file")
                 .and(header::value("Range"))
                 .map(|range: HeaderValue| {
@@ -1064,13 +1199,17 @@ mod tests {
                 });
             action_1.or(action_2)
         };
-        starts_with_server!(addr, routes, {
-            let io_urls = vec![format!("http://{}", addr)];
+
+        starts_with_server!(uc_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", uc_addr)];
             {
                 let downloader =
                     RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                         .use_getfile_api(false)
                         .normalize_key(true)
+                        .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                        .dot_interval(Duration::from_millis(0))
+                        .max_dot_buffer_size(1)
                         .build();
                 spawn_blocking(move || {
                     let mut buf = [0u8; 6];
@@ -1084,6 +1223,9 @@ mod tests {
                     RangeReader::builder("bucket", "file2", get_credential(), io_urls.to_owned())
                         .use_getfile_api(false)
                         .normalize_key(true)
+                        .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                        .dot_interval(Duration::from_millis(0))
+                        .max_dot_buffer_size(1)
                         .build();
                 spawn_blocking(move || {
                     let mut buf = [0u8; 12];
@@ -1092,6 +1234,22 @@ mod tests {
                 })
                 .await?;
             }
+
+            delay_for(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(0));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(0));
+            }
         });
         Ok(())
     }
@@ -1099,34 +1257,54 @@ mod tests {
     #[tokio::test]
     async fn test_read_at_2() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
-        let counter = Arc::new(AtomicUsize::new(0));
-        let routes = {
-            let counter = counter.to_owned();
+        let io_called = Arc::new(AtomicUsize::new(0));
+        let io_routes = {
+            let io_called = io_called.to_owned();
             path!("file")
                 .and(header::value("Range"))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=1-5");
-                    counter.fetch_add(1, Relaxed);
+                    io_called.fetch_add(1, Relaxed);
                     let mut resp = Response::new("12345".into());
                     *resp.status_mut() = StatusCode::NOT_IMPLEMENTED;
                     resp
                 })
         };
-        starts_with_server!(addr, routes, {
-            let io_urls = vec![format!("http://{}", addr)];
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .io_tries(3)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1)
                     .build();
             spawn_blocking(move || {
                 let mut buf = [0u8; 5];
                 downloader.read_at(1, &mut buf).unwrap_err();
-                assert_eq!(counter.load(Relaxed), 3);
+                assert_eq!(io_called.load(Relaxed), 3);
             })
             .await?;
+
+            delay_for(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(3));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
         });
         Ok(())
     }
@@ -1134,33 +1312,53 @@ mod tests {
     #[tokio::test]
     async fn test_read_at_3() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
-        let counter = Arc::new(AtomicUsize::new(0));
-        let routes = {
-            let counter = counter.to_owned();
+        let io_called = Arc::new(AtomicUsize::new(0));
+        let io_routes = {
+            let io_called = io_called.to_owned();
             path!("file")
                 .and(header::value("Range"))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=1-5");
-                    counter.fetch_add(1, Relaxed);
+                    io_called.fetch_add(1, Relaxed);
                     let mut resp = Response::new("12345".into());
                     *resp.status_mut() = StatusCode::BAD_REQUEST;
                     resp
                 })
         };
-        starts_with_server!(addr, routes, {
-            let io_urls = vec![format!("http://{}", addr)];
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .use_getfile_api(false)
                     .normalize_key(true)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1)
                     .build();
             spawn_blocking(move || {
                 let mut buf = [0u8; 5];
                 downloader.read_at(1, &mut buf).unwrap_err();
-                assert_eq!(counter.load(Relaxed), 1);
+                assert_eq!(io_called.load(Relaxed), 1);
             })
             .await?;
+
+            delay_for(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
         });
         Ok(())
     }
@@ -1168,8 +1366,9 @@ mod tests {
     #[tokio::test]
     async fn test_read_last_bytes() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
-        let routes = path!("file")
+        let io_routes = path!("file")
             .and(header::value("Range"))
             .map(|range: HeaderValue| {
                 assert_eq!(range.to_str().unwrap(), "bytes=-10");
@@ -1181,13 +1380,16 @@ mod tests {
                 );
                 resp
             });
-        starts_with_server!(addr, routes, {
-            let io_urls = vec![format!("http://{}", addr)];
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
             {
                 let downloader =
                     RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                         .use_getfile_api(false)
                         .normalize_key(true)
+                        .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                        .dot_interval(Duration::from_millis(0))
+                        .max_dot_buffer_size(1)
                         .build();
 
                 spawn_blocking(move || {
@@ -1199,6 +1401,25 @@ mod tests {
                     assert_eq!(&buf, b"1234567890");
                 })
                 .await?;
+
+                delay_for(Duration::from_secs(5)).await;
+                {
+                    let record = records_map
+                        .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                        .unwrap();
+                    assert_eq!(record.success_count(), Some(1));
+                    assert_eq!(record.failed_count(), Some(0));
+                }
+                {
+                    let record = records_map
+                        .get(&DotRecordKey::new(
+                            DotType::Sdk,
+                            ApiName::RangeReaderReadLastBytes,
+                        ))
+                        .unwrap();
+                    assert_eq!(record.success_count(), Some(1));
+                    assert_eq!(record.failed_count(), Some(0));
+                }
             }
         });
         Ok(())
@@ -1207,14 +1428,18 @@ mod tests {
     #[tokio::test]
     async fn test_download_file() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
-        let routes = { path!("file").map(|| Response::new("1234567890".into())) };
-        starts_with_server!(addr, routes, {
-            let io_urls = vec![format!("http://{}", addr)];
+        let io_routes = { path!("file").map(|| Response::new("1234567890".into())) };
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .use_getfile_api(false)
                     .normalize_key(true)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1)
                     .build();
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
@@ -1222,6 +1447,42 @@ mod tests {
                 assert_eq!(&downloader.download().unwrap(), b"1234567890");
             })
             .await?;
+
+            delay_for(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(3));
+                assert_eq!(record.failed_count(), Some(0));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderExist))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(0));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(
+                        DotType::Sdk,
+                        ApiName::RangeReaderFileSize,
+                    ))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(0));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(
+                        DotType::Sdk,
+                        ApiName::RangeReaderDownloadTo,
+                    ))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(0));
+            }
         });
         Ok(())
     }
@@ -1229,6 +1490,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_file_2() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
@@ -1240,13 +1502,16 @@ mod tests {
                 resp
             })
         };
-        starts_with_server!(addr, routes, {
+        starts_with_server!(addr, monitor_addr, routes, records_map, {
             let io_urls = vec![format!("http://{}", addr)];
             let downloader =
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .io_tries(3)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .use_getfile_api(false)
                     .normalize_key(true)
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1)
                     .build();
             spawn_blocking(move || {
                 downloader.exist().unwrap_err();
@@ -1255,6 +1520,45 @@ mod tests {
                 assert_eq!(counter.load(Relaxed), 3 * 3);
             })
             .await?;
+            delay_for(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(
+                        DotType::Sdk,
+                        ApiName::RangeReaderFileSize,
+                    ))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderExist))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(
+                        DotType::Sdk,
+                        ApiName::RangeReaderDownloadTo,
+                    ))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(1));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(0));
+                assert_eq!(record.failed_count(), Some(9));
+            }
+            {
+                let record = records_map.get(&DotRecordKey::punished()).unwrap();
+                assert_eq!(record.punished_count(), Some(4));
+            }
         });
         Ok(())
     }
@@ -1262,6 +1566,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_file_3() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
@@ -1294,6 +1599,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_file_4() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
@@ -1321,6 +1627,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let routes = {
             path!("file")
@@ -1380,6 +1687,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_2() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let routes = {
             path!("file")
@@ -1413,6 +1721,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_3() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let counter = Arc::new(AtomicUsize::new(0));
         let routes = {
@@ -1463,6 +1772,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_4() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let routes = {
             path!("file")
@@ -1522,6 +1832,7 @@ mod tests {
     #[tokio::test]
     async fn test_download_range_5() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let routes = {
             path!("file")
@@ -1588,6 +1899,7 @@ mod tests {
     #[test]
     fn test_sign_download_url_with_deadline() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
+        clear_cache()?;
 
         let credential = Credential::new("abcdefghklmnopq", "1234567890");
         assert_eq!(
@@ -1597,6 +1909,26 @@ mod tests {
             )?,
             "http://www.qiniu.com/?go=1&e=1234571490&token=abcdefghklmnopq:KjQtlGAkEOhSwtFjJfYtYa2-reE=",
         );
+        Ok(())
+    }
+
+    fn clear_cache() -> IOResult<()> {
+        let cache_file_path = cache_dir_path_of("query-cache.json")?;
+        std::fs::remove_file(&cache_file_path).or_else(|err| {
+            if err.kind() == IOErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })?;
+        let dot_file_path = cache_dir_path_of("dot-file")?;
+        std::fs::remove_file(&dot_file_path).or_else(|err| {
+            if err.kind() == IOErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })?;
         Ok(())
     }
 }
