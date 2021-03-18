@@ -33,6 +33,11 @@ impl Credential {
         self.access_key.to_owned() + ":" + &self.base64_hmac_digest(data)
     }
 
+    pub(crate) fn sign_with_data(&self, data: &[u8]) -> String {
+        let encoded_data = base64::urlsafe(data);
+        self.sign(encoded_data.as_bytes()) + ":" + &encoded_data
+    }
+
     fn base64_hmac_digest(&self, data: &[u8]) -> String {
         let mut hmac = Hmac::<Sha1>::new_varkey(self.secret_key.as_bytes()).unwrap();
         hmac.input(data);

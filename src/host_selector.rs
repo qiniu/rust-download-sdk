@@ -1,3 +1,4 @@
+use super::dot::Dotter;
 use dashmap::DashMap;
 use log::{info, warn};
 use rand::{seq::SliceRandom, thread_rng};
@@ -518,7 +519,18 @@ impl HostSelector {
         }
     }
 
-    pub(super) fn punish(&self, host: &str, error: &IOError) -> bool {
+    pub(super) fn punish(&self, host: &str, error: &IOError, dotter: &Dotter) -> bool {
+        match self.punish_without_dotter(host, error) {
+            PunishResult::NoPunishment => false,
+            PunishResult::Punished => true,
+            PunishResult::PunishedAndFreezed => {
+                dotter.punish().ok();
+                true
+            }
+        }
+    }
+
+    pub(super) fn punish_without_dotter(&self, host: &str, error: &IOError) -> PunishResult {
         if self.host_punisher.should_punish(error) {
             if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
                 punished_info.continuous_punished_times += 1;
@@ -527,10 +539,14 @@ impl HostSelector {
                     "Punish host {}, now continuous_punished_times is {}, and timeout_power is {}",
                     host, punished_info.continuous_punished_times, punished_info.timeout_power
                 );
+
+                if !self.host_punisher.is_available(&punished_info) {
+                    return PunishResult::PunishedAndFreezed;
+                }
             }
-            true
+            PunishResult::Punished
         } else {
-            false
+            PunishResult::NoPunishment
         }
     }
 
@@ -592,6 +608,12 @@ impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
             }
         }
     }
+}
+
+pub(super) enum PunishResult {
+    NoPunishment,
+    Punished,
+    PunishedAndFreezed,
 }
 
 #[cfg(test)]
@@ -728,13 +750,21 @@ mod tests {
             assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
             host_selector.increase_timeout_power_by("http://host1", 0);
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err1"));
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err1"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host2".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err2"));
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err2"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host3".to_owned());
@@ -746,14 +776,30 @@ mod tests {
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
             host_selector.increase_timeout_power_by("http://host1", 1);
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err3"));
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err3"),
+                &Default::default(),
+            );
             assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
-            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "err4"));
+            host_selector.punish(
+                "http://host2",
+                &IOError::new(IOErrorKind::Other, "err4"),
+                &Default::default(),
+            );
             assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
             host_selector.increase_timeout_power_by("http://host2", 0);
-            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "err5"));
+            host_selector.punish(
+                "http://host2",
+                &IOError::new(IOErrorKind::Other, "err5"),
+                &Default::default(),
+            );
             host_selector.increase_timeout_power_by("http://host3", 1);
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err6"));
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err6"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host3".to_owned());
@@ -775,7 +821,11 @@ mod tests {
                 assert_eq!(host_info.timeout, Duration::from_millis(200));
             }
             host_selector.increase_timeout_power_by("http://host3", 2);
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err7"));
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err7"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host3".to_owned());
@@ -829,13 +879,37 @@ mod tests {
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
             host_selector.increase_timeout_power_by("http://host3", 2);
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err8"));
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err9"));
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err10"));
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err8"),
+                &Default::default(),
+            );
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err9"),
+                &Default::default(),
+            );
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err10"),
+                &Default::default(),
+            );
             host_selector.increase_timeout_power_by("http://host1", 3);
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err11"));
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err12"));
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "err13"));
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err11"),
+                &Default::default(),
+            );
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err12"),
+                &Default::default(),
+            );
+            host_selector.punish(
+                "http://host1",
+                &IOError::new(IOErrorKind::Other, "err13"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host2".to_owned());
@@ -847,7 +921,11 @@ mod tests {
                 assert_eq!(host_info.timeout, Duration::from_millis(800));
             }
             host_selector.increase_timeout_power_by("http://host3", 3);
-            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "err14"));
+            host_selector.punish(
+                "http://host3",
+                &IOError::new(IOErrorKind::Other, "err14"),
+                &Default::default(),
+            );
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host2".to_owned());

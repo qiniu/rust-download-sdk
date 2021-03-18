@@ -30,12 +30,15 @@ log = "0.4.14"
 toml = "0.5.8"
 tap = "1.0.1"
 notify = "4.0.16"
+fd-lock = "2.0.0"
+anyhow = "1.0.32"
 
 [dev-dependencies]
 futures = "0.3.5"
 warp = "0.2.5"
-tokio = { version = "0.2.22", features = ["rt-core", "blocking", "macros"] }
+tokio = { version = "0.2.22", features = ["rt-core", "blocking", "macros", "time"] }
 structopt = "0.3.18"
 anyhow = "1.0.32"
 env_logger = "0.8.3"
 tempfile = "3.2.0"
+rayon = "1.5.0"

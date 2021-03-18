@@ -23,6 +23,8 @@ jobs:
           command: clippy
           args: -- -D warnings
       - uses: actions-rs/cargo@v1
+        env:
+          RUST_LOG: debug
         with:
           command: test
-          args: -- --test-threads=1
+          args: -- --nocapture --test-threads=1
