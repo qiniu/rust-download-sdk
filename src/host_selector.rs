@@ -1,4 +1,5 @@
 use dashmap::DashMap;
+use log::debug;
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
     collections::HashSet,
@@ -36,6 +37,7 @@ struct HostsUpdater {
     hosts_map: DashMap<String, PunishedInfo>,
     update_func: Option<UpdateFn>,
     index: AtomicUsize,
+    current_timeout_power: AtomicUsize,
 }
 
 impl HostsUpdater {
@@ -48,6 +50,7 @@ impl HostsUpdater {
             hosts: RwLock::new(hosts),
             update_func,
             index: AtomicUsize::new(0),
+            current_timeout_power: AtomicUsize::new(0),
         })
     }
 
@@ -272,38 +275,70 @@ impl HostSelector {
     }
 
     pub(super) fn select_host(&self) -> HostInfo {
-        #[derive(Debug)]
         struct CurrentHostInfo<'a> {
             host: &'a str,
             timeout: Duration,
+            timeout_power: usize,
         }
         let mut current_host_info = None;
 
         let hosts = self.hosts_updater.hosts.read().unwrap();
-        for _ in 0..=self.host_punisher.max_seek_times(hosts.len()) {
+        let max_seek_times = self.host_punisher.max_seek_times(hosts.len());
+        for seek_times in 0..=max_seek_times {
             let index = self.hosts_updater.next_index();
             let host = hosts[index % hosts.len()].as_str();
             current_host_info = Some(CurrentHostInfo {
                 host,
                 timeout: self.host_punisher.base_timeout,
+                timeout_power: 0,
             });
+            debug!(
+                "try to select host {}, timeout: {:?}",
+                host, self.host_punisher.base_timeout,
+            );
             if let Some(punished_info) = self.hosts_updater.hosts_map.get(host) {
                 if self.host_punisher.is_punishment_expired(&punished_info) {
+                    debug!("host {} is selected directly because there is no punishment or punishment is expired", host);
                     break;
                 }
                 current_host_info = Some(CurrentHostInfo {
                     host,
                     timeout: self.host_punisher.timeout(&punished_info),
+                    timeout_power: punished_info.timeout_power,
                 });
-                if self.host_punisher.is_available(&punished_info) {
+                let current_timeout_power = self.hosts_updater.current_timeout_power.load(Relaxed);
+                if current_timeout_power < punished_info.timeout_power {
+                    if seek_times < max_seek_times {
+                        debug!("host {} will not be selected because its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                    } else {
+                        debug!("host {} is selected even its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                    }
+                } else if !self.host_punisher.is_available(&punished_info) {
+                    if seek_times < max_seek_times {
+                        debug!("host {} will not be selected because of too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                    } else {
+                        debug!("host {} is selected even it has too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                    }
+                } else {
+                    debug!(
+                        "host {} is selected, timeout: {:?}, timeout power: {:?}",
+                        host,
+                        self.host_punisher.timeout(&punished_info),
+                        punished_info.timeout_power,
+                    );
                     break;
                 }
             }
         }
         current_host_info
-            .map(|h| HostInfo {
-                host: h.host.to_owned(),
-                timeout: h.timeout,
+            .map(|h| {
+                self.hosts_updater
+                    .current_timeout_power
+                    .store(h.timeout_power, Relaxed);
+                HostInfo {
+                    host: h.host.to_owned(),
+                    timeout: h.timeout,
+                }
             })
             .unwrap()
     }
@@ -341,6 +376,8 @@ mod tests {
 
     #[test]
     fn test_hosts_updater() {
+        env_logger::try_init().ok();
+
         let hosts_updater = HostsUpdater::new(
             vec![
                 "http://host1".to_owned(),
@@ -368,6 +405,8 @@ mod tests {
 
     #[test]
     fn test_hosts_update() {
+        env_logger::try_init().ok();
+
         let host_selector = HostSelectorBuilder::new(vec![])
             .update_callback(Some(Box::new(|| {
                 Ok(vec![
@@ -389,6 +428,8 @@ mod tests {
 
     #[test]
     fn test_hosts_updater_auto_update() {
+        env_logger::try_init().ok();
+
         let hosts_updater = HostsUpdater::new(
             vec![
                 "http://host1".to_owned(),
@@ -417,6 +458,8 @@ mod tests {
 
     #[test]
     fn test_hosts_selector() {
+        env_logger::try_init().ok();
+
         let punished_errs = Arc::new(Mutex::new(Vec::new()));
         {
             let host_selector = HostSelectorBuilder::new(vec![
@@ -456,20 +499,35 @@ mod tests {
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
-            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
-            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
-            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
-            host_selector.increase_timeout_power("http://host2");
-            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
-            host_selector.increase_timeout_power("http://host2");
-            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 6"));
             {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
+            }
+            host_selector.increase_timeout_power("http://host1");
+            host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
+            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
+            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
+            assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
+            host_selector.increase_timeout_power("http://host2");
+            host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
+            host_selector.increase_timeout_power("http://host3");
+            host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 6"));
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(400));
             }
-            assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(200));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(200));
+            }
             sleep(Duration::from_millis(500));
             {
                 let host_info = host_selector.select_host();
