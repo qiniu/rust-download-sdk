@@ -377,8 +377,11 @@ impl ReadAt for RangeReader {
                         }
                         let content_length = parse_content_length(&resp);
                         let max_size = content_length.min(size);
-                        io_copy(&mut resp.take(max_size), &mut cursor)
-                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
+                        io_copy(
+                            &mut self.wrap_reader(resp.take(max_size), chosen_host),
+                            &mut cursor,
+                        )
+                        .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                     });
 
                 result.map(|size| size as usize).tap_err(|err| {
@@ -424,19 +427,20 @@ impl RangeReader {
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .and_then(|mut resp| {
+                    .and_then(|resp| {
                         let mut parts = Vec::with_capacity(ranges.len());
                         match resp.status() {
                             StatusCode::OK => {
-                                let body = resp
-                                    .bytes()
+                                let mut body = Vec::new();
+                                self.wrap_reader(resp, chosen_host)
+                                    .read_to_end(&mut body)
                                     .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                                 for &(from, len) in ranges.iter() {
                                     let from = (from as usize).min(body.len());
                                     let len = (len as usize).min(body.len() - from);
                                     if len > 0 {
                                         parts.push(RangePart {
-                                            data: body.slice(from..(from + len)).to_vec(),
+                                            data: body[from..(from + len)].to_vec(),
                                             range: (from as u64, len as u64),
                                         });
                                     }
@@ -464,7 +468,8 @@ impl RangeReader {
                                         .to_owned()
                                     };
 
-                                    let mut multipart = Multipart::with_body(&mut resp, boundary);
+                                    let mut body = self.wrap_reader(resp, chosen_host);
+                                    let mut multipart = Multipart::with_body(&mut body, boundary);
                                     loop {
                                         match multipart.read_entry() {
                                             Ok(Some(mut field)) => {
@@ -527,7 +532,7 @@ impl RangeReader {
                                         })?;
                                     let len = to - from + 1;
                                     let mut data = Vec::with_capacity(len as usize);
-                                    resp.copy_to(&mut data).unwrap();
+                                    self.wrap_reader(resp, chosen_host).read_to_end(&mut data)?;
                                     parts.push(RangePart {
                                         data,
                                         range: (from, len),
@@ -669,7 +674,7 @@ impl RangeReader {
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .and_then(|mut resp| {
+                    .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                             Ok(0)
                         } else if resp.status() != StatusCode::OK
@@ -677,7 +682,7 @@ impl RangeReader {
                         {
                             Err(unexpected_status_code(&resp))
                         } else {
-                            resp.copy_to(writer)
+                            io_copy(&mut self.wrap_reader(resp, chosen_host), writer)
                                 .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                         }
                     });
@@ -750,6 +755,11 @@ impl RangeReader {
                 );
             },
         )
+    }
+
+    #[inline]
+    fn wrap_reader<'a, R: 'a + Read>(&'a self, source: R, chosen_host: &'a str) -> impl Read + 'a {
+        self.inner.io_selector.wrap_reader(source, chosen_host)
     }
 
     fn with_retries<T>(
@@ -1105,7 +1115,6 @@ mod tests {
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .use_getfile_api(false)
                     .normalize_key(true)
-                    .normalize_key(true)
                     .build();
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
@@ -1137,7 +1146,6 @@ mod tests {
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .io_tries(3)
                     .use_getfile_api(false)
-                    .normalize_key(true)
                     .normalize_key(true)
                     .build();
             spawn_blocking(move || {

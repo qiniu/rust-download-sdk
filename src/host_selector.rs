@@ -4,7 +4,7 @@ use rand::{seq::SliceRandom, thread_rng};
 use std::{
     collections::HashSet,
     fmt::{Debug, Formatter, Result as FormatResult},
-    io::{Error as IOError, Result as IOResult},
+    io::{Error as IOError, ErrorKind as IOErrorKind, Read, Result as IOResult},
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc, Mutex, RwLock,
@@ -130,6 +130,13 @@ impl HostsUpdater {
                     }
                 }
             }
+        }
+    }
+
+    #[inline]
+    pub fn increase_timeout_power(&self, host: &str) {
+        if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
+            punished_info.timeout_power += 1;
         }
     }
 }
@@ -383,9 +390,12 @@ impl HostSelector {
             .unwrap()
     }
 
+    #[inline]
     pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
+            let timeout_power = punished_info.timeout_power;
             *punished_info = Default::default();
+            punished_info.timeout_power = timeout_power.saturating_sub(1);
         }
     }
 
@@ -401,9 +411,41 @@ impl HostSelector {
         }
     }
 
+    #[inline]
     pub(super) fn increase_timeout_power(&self, host: &str) {
-        if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
-            punished_info.timeout_power += 1;
+        self.hosts_updater.increase_timeout_power(host)
+    }
+
+    #[inline]
+    pub(super) fn wrap_reader<'a, R: Read>(
+        &'a self,
+        reader: R,
+        host: &'a str,
+    ) -> ReaderWithTimeoutPower<'a, R> {
+        ReaderWithTimeoutPower {
+            reader,
+            host,
+            hosts_updater: &self.hosts_updater,
+        }
+    }
+}
+
+pub(super) struct ReaderWithTimeoutPower<'a, R: Read> {
+    reader: R,
+    hosts_updater: &'a HostsUpdater,
+    host: &'a str,
+}
+
+impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        match self.reader.read(buf) {
+            Ok(have_read) => Ok(have_read),
+            Err(err) if err.kind() == IOErrorKind::TimedOut => {
+                self.hosts_updater.increase_timeout_power(self.host);
+                Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 }
