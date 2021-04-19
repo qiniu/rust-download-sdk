@@ -1,10 +1,10 @@
-use std::{convert::TryInto, env, fs, time::Duration, u64};
-
 use super::{base::credential::Credential, download::RangeReaderBuilder};
+use isahc::{config::Configurable, http::header::USER_AGENT, HttpClient};
 use log::{error, warn};
+use num_cpus::get as get_num_cpus;
 use once_cell::sync::Lazy;
-use reqwest::blocking::Client as HTTPClient;
 use serde::Deserialize;
+use std::{convert::TryInto, env, fs, time::Duration, u64};
 
 /// 七牛配置信息
 #[derive(Deserialize, Debug)]
@@ -27,11 +27,12 @@ pub struct Config {
     private: Option<bool>,
     retry: Option<usize>,
     punish_time_s: Option<u64>,
-    base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
+    low_speed_time_s: Option<u64>,
+    base_low_speed_limit: Option<u32>,
 }
 static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
-pub(super) static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(build_http_client);
+pub(super) static HTTP_CLIENT: Lazy<HttpClient> = Lazy::new(build_http_client);
 
 /// 判断当前是否已经启用七牛环境
 ///
@@ -41,15 +42,9 @@ pub fn is_qiniu_enabled() -> bool {
     QINIU_CONFIG.is_some()
 }
 
-fn build_http_client() -> HTTPClient {
-    let mut base_timeout_ms = 3000u64;
+fn build_http_client() -> HttpClient {
     let mut dial_timeout_ms = 500u64;
     if let Some(config) = QINIU_CONFIG.as_ref() {
-        if let Some(value) = config.base_timeout_ms {
-            if value > 0 {
-                base_timeout_ms = value;
-            }
-        }
         if let Some(value) = config.dial_timeout_ms {
             if value > 0 {
                 dial_timeout_ms = value;
@@ -57,12 +52,11 @@ fn build_http_client() -> HTTPClient {
         }
     }
     let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
-    HTTPClient::builder()
-        .user_agent(user_agent)
+    HttpClient::builder()
+        .connection_cache_size(get_num_cpus() * 2)
+        .default_header(USER_AGENT, user_agent)
         .connect_timeout(Duration::from_millis(dial_timeout_ms))
-        .timeout(Duration::from_millis(base_timeout_ms))
-        .pool_max_idle_per_host(5)
-        .connection_verbose(true)
+        .tcp_keepalive(Duration::from_secs(60))
         .build()
         .expect("Failed to build Reqwest Client")
 }
@@ -125,10 +119,14 @@ pub(super) fn build_range_reader_builder_from_config(
             builder = builder.punish_duration(Duration::from_secs(punish_time_s));
         }
     }
-
-    if let Some(base_timeout_ms) = config.base_timeout_ms {
-        if base_timeout_ms > 0 {
-            builder = builder.base_timeout(Duration::from_millis(base_timeout_ms));
+    if let Some(low_speed_time_s) = config.low_speed_time_s {
+        if low_speed_time_s > 0 {
+            builder = builder.low_speed_duration(Duration::from_secs(low_speed_time_s));
+        }
+    }
+    if let Some(base_low_speed_limit) = config.base_low_speed_limit {
+        if base_low_speed_limit > 0 {
+            builder = builder.base_low_speed_limit(base_low_speed_limit);
         }
     }
 
@@ -187,8 +185,9 @@ impl ConfigBuilder {
                 private: None,
                 retry: None,
                 punish_time_s: None,
-                base_timeout_ms: None,
                 dial_timeout_ms: None,
+                low_speed_time_s: None,
+                base_low_speed_limit: None,
             },
         }
     }
@@ -241,19 +240,19 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置域名访问的基础超时时长，默认为 3000 毫秒
-    #[inline]
-    pub fn base_timeout(mut self, base_timeout: Option<Duration>) -> Self {
-        self.inner.base_timeout_ms =
-            base_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
-        self
-    }
-
     /// 配置域名连接的超时时长，默认为 500 毫秒
     #[inline]
     pub fn connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
         self.inner.dial_timeout_ms =
             connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
+
+    /// 配置低速网络基础阈值，默认为最低 1 MB/秒，如果持续三秒则终止
+    #[inline]
+    pub fn base_low_speed(mut self, duration: Duration, base_limit_bytes_per_second: u32) -> Self {
+        self.inner.low_speed_time_s = Some(duration.as_secs());
+        self.inner.base_low_speed_limit = Some(base_limit_bytes_per_second);
         self
     }
 }

@@ -6,15 +6,19 @@ use super::{
     req_id::{get_req_id, REQUEST_ID_HEADER},
     HTTP_CLIENT,
 };
+use isahc::{
+    config::Configurable,
+    http::{
+        header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+        request::Builder as RequestBuilder,
+        Method, Request, StatusCode,
+    },
+    Response,
+};
 use log::{debug, error, info, warn};
 use multipart::server::Multipart;
 use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
-use reqwest::{
-    blocking::{RequestBuilder as HTTPRequestBuilder, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
-    Error as ReqwestError, Method, StatusCode,
-};
 use std::{
     io::{
         copy as io_copy, Cursor, Error as IOError, ErrorKind as IOErrorKind, Read,
@@ -87,6 +91,7 @@ struct RangeReaderInner {
     use_getfile_api: bool,
     normalize_key: bool,
     private_url_lifetime: Option<Duration>,
+    low_speed_duration: Duration,
 }
 
 #[derive(Debug)]
@@ -101,13 +106,14 @@ pub struct RangeReaderBuilder {
     uc_tries: usize,
     update_interval: Duration,
     punish_duration: Duration,
-    base_timeout: Duration,
     max_punished_times: usize,
     max_punished_hosts_percent: u8,
     use_getfile_api: bool,
     normalize_key: bool,
     private_url_lifetime: Option<Duration>,
     use_https: bool,
+    low_speed_duration: Duration,
+    base_low_speed_limit: u32,
 }
 
 impl RangeReaderBuilder {
@@ -135,13 +141,14 @@ impl RangeReaderBuilder {
             uc_tries: 10,
             update_interval: Duration::from_secs(60),
             punish_duration: Duration::from_secs(30 * 60),
-            base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
             use_getfile_api: true,
             normalize_key: false,
             private_url_lifetime: None,
             use_https: false,
+            low_speed_duration: Duration::from_secs(3),
+            base_low_speed_limit: 1 << 20,
         }
     }
 
@@ -177,13 +184,6 @@ impl RangeReaderBuilder {
     #[inline]
     pub fn punish_duration(mut self, duration: Duration) -> Self {
         self.punish_duration = duration;
-        self
-    }
-
-    /// 设置域名访问的基础超时时长
-    #[inline]
-    pub fn base_timeout(mut self, timeout: Duration) -> Self {
-        self.base_timeout = timeout;
         self
     }
 
@@ -233,6 +233,20 @@ impl RangeReaderBuilder {
         self
     }
 
+    /// 设置低速下载持续时间
+    #[inline]
+    pub fn low_speed_duration(mut self, low_speed_duration: Duration) -> Self {
+        self.low_speed_duration = low_speed_duration;
+        self
+    }
+
+    /// 配置低速网络基础阈值
+    #[inline]
+    pub fn base_low_speed_limit(mut self, base_low_speed_limit: u32) -> Self {
+        self.base_low_speed_limit = base_low_speed_limit;
+        self
+    }
+
     /// 构建范围下载器
     #[inline]
     pub fn build(self) -> RangeReader {
@@ -250,9 +264,10 @@ impl RangeReaderBuilder {
                     .punish_duration(self.punish_duration)
                     .max_punished_times(self.max_punished_times)
                     .max_punished_hosts_percent(self.max_punished_hosts_percent)
-                    .base_timeout(self.base_timeout)
+                    .base_low_speed_limit(self.base_low_speed_limit)
                     .build(),
                 self.uc_tries,
+                self.low_speed_duration,
             ))
         };
         let access_key = self.credential.access_key().to_owned();
@@ -274,7 +289,7 @@ impl RangeReaderBuilder {
             .punish_duration(self.punish_duration)
             .max_punished_times(self.max_punished_times)
             .max_punished_hosts_percent(self.max_punished_hosts_percent)
-            .base_timeout(self.base_timeout)
+            .base_low_speed_limit(self.base_low_speed_limit)
             .build();
 
         (
@@ -286,6 +301,7 @@ impl RangeReaderBuilder {
                 use_getfile_api: self.use_getfile_api,
                 normalize_key: self.normalize_key,
                 private_url_lifetime: self.private_url_lifetime,
+                low_speed_duration: self.low_speed_duration,
             }),
             self.key,
         )
@@ -368,10 +384,12 @@ impl ReadAt for RangeReader {
                     tries, download_url, &range
                 );
 
-                let result = request_builder
+                let request = request_builder
                     .header(RANGE, &range)
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let code = resp.status();
@@ -381,7 +399,7 @@ impl ReadAt for RangeReader {
                         let content_length = parse_content_length(&resp);
                         let max_size = content_length.min(size);
                         io_copy(
-                            &mut self.wrap_reader(resp.take(max_size), chosen_host),
+                            &mut self.wrap_reader(resp.into_body().take(max_size), chosen_host),
                             &mut cursor,
                         )
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
@@ -433,17 +451,19 @@ impl RangeReader {
                     "[{}] read_multi_ranges url: {}, range: {:?}",
                     tries, download_url, ranges
                 );
-                let result = http_request_builder
+                let request = http_request_builder
                     .header(RANGE, &range_header_value)
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let mut parts = Vec::with_capacity(ranges.len());
                         match resp.status() {
                             StatusCode::OK => {
                                 let mut body = Vec::new();
-                                self.wrap_reader(resp, chosen_host)
+                                self.wrap_reader(resp.into_body(), chosen_host)
                                     .read_to_end(&mut body)
                                     .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                                 for &(from, len) in ranges.iter() {
@@ -479,7 +499,7 @@ impl RangeReader {
                                         .to_owned()
                                     };
 
-                                    let mut body = self.wrap_reader(resp, chosen_host);
+                                    let mut body = self.wrap_reader(resp.into_body(), chosen_host);
                                     let mut multipart = Multipart::with_body(&mut body, boundary);
                                     loop {
                                         match multipart.read_entry() {
@@ -543,7 +563,8 @@ impl RangeReader {
                                         })?;
                                     let len = to - from + 1;
                                     let mut data = Vec::with_capacity(len as usize);
-                                    self.wrap_reader(resp, chosen_host).read_to_end(&mut data)?;
+                                    self.wrap_reader(resp.into_body(), chosen_host)
+                                        .read_to_end(&mut data)?;
                                     parts.push(RangePart {
                                         data,
                                         range: (from, len),
@@ -607,11 +628,13 @@ impl RangeReader {
     pub fn exist(&self) -> IOResult<bool> {
         self.with_retries(
             Method::HEAD,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, _| {
                 debug!("[{}] exist url: {}", tries, download_url);
-                let result = request_builder
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                let request = request_builder
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| match resp.status() {
                         StatusCode::OK => Ok(true),
@@ -642,11 +665,13 @@ impl RangeReader {
     pub fn file_size(&self) -> IOResult<u64> {
         self.with_retries(
             Method::HEAD,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, _| {
                 debug!("[{}] file_size url: {}", tries, download_url);
-                let result = request_builder
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                let request = request_builder
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::Other, err))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::OK {
@@ -698,9 +723,11 @@ impl RangeReader {
                     request_builder =
                         request_builder.header(RANGE, format!("bytes={}-", start_from));
                 }
-                let result = request_builder
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                let request = request_builder
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
@@ -710,7 +737,7 @@ impl RangeReader {
                         {
                             Err(unexpected_status_code(&resp))
                         } else {
-                            io_copy(&mut self.wrap_reader(resp, chosen_host), writer)
+                            io_copy(&mut self.wrap_reader(resp.into_body(), chosen_host), writer)
                                 .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                         }
                     });
@@ -753,10 +780,12 @@ impl RangeReader {
                     "[{}] read_last_bytes url: {}, len: {}",
                     tries, download_url, size
                 );
-                let result = request_builder
+                let request = request_builder
                     .header(RANGE, &range)
-                    .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .body(())
+                    .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+                let result = HTTP_CLIENT
+                    .send(request)
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         if resp.status() != StatusCode::PARTIAL_CONTENT {
@@ -776,7 +805,10 @@ impl RangeReader {
                             parse_range_header(content_range).map_err(|_| {
                                 IOError::new(IOErrorKind::InvalidData, "Invalid Content-Range")
                             })?;
-                        let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
+                        let actual_size = io_copy(
+                            &mut self.wrap_reader(resp.into_body(), chosen_host).take(size),
+                            &mut cursor,
+                        )?;
                         Ok((actual_size, total_size))
                     });
                 result
@@ -804,14 +836,14 @@ impl RangeReader {
     }
 
     #[inline]
-    fn wrap_reader<'a, R: 'a + Read>(&'a self, source: R, chosen_host: &'a str) -> impl Read + 'a {
+    fn wrap_reader<'a, R: 'a + Read>(&'a self, source: R, chosen_host: &'a str) -> impl 'a + Read {
         self.inner.io_selector.wrap_reader(source, chosen_host)
     }
 
     fn with_retries<T>(
         &self,
         method: Method,
-        mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str) -> IOResult<T>,
+        mut for_each_url: impl FnMut(usize, RequestBuilder, &str, &str) -> IOResult<T>,
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
         let now = SystemTime::now();
@@ -834,10 +866,14 @@ impl RangeReader {
                 self.inner.private_url_lifetime,
                 &self.inner.credential,
             );
-            let request_builder = HTTP_CLIENT
-                .request(method.to_owned(), download_url.to_owned())
+            let request_builder = Request::builder()
+                .method(method.to_owned())
+                .uri(download_url.as_str())
                 .header(REQUEST_ID_HEADER, get_req_id(now, tries))
-                .timeout(chosen_io_info.timeout);
+                .low_speed_timeout(
+                    chosen_io_info.low_speed_limit,
+                    self.inner.low_speed_duration,
+                );
             match for_each_url(
                 tries,
                 request_builder,
@@ -910,20 +946,13 @@ impl RangeReader {
             }
         }
     }
-
-    #[inline]
-    fn increase_timeout_power_if_needed(&self, host: &str, err: &ReqwestError) {
-        if err.is_timeout() {
-            self.inner.io_selector.increase_timeout_power(host)
-        }
-    }
 }
 
 pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
 
 #[inline]
-fn unexpected_status_code(resp: &HTTPResponse) -> IOError {
+fn unexpected_status_code<B>(resp: &Response<B>) -> IOError {
     let error_kind = if resp.status().is_client_error() {
         IOErrorKind::InvalidData
     } else {
@@ -935,7 +964,7 @@ fn unexpected_status_code(resp: &HTTPResponse) -> IOError {
     )
 }
 
-fn parse_content_length(resp: &HTTPResponse) -> u64 {
+fn parse_content_length<B>(resp: &Response<B>) -> u64 {
     resp.headers()
         .get(CONTENT_LENGTH)
         .and_then(|length| length.to_str().ok())
@@ -955,7 +984,9 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
 mod tests {
     use super::*;
     use futures::channel::oneshot::channel;
+    use isahc::error::{Error as IsahcError, ErrorKind as IsahcErrorKind};
     use multipart::client::lazy::Multipart;
+    use rand::{thread_rng, RngCore};
     use std::{
         boxed::Box,
         error::Error,
@@ -966,10 +997,14 @@ mod tests {
             Arc,
         },
     };
-    use tokio::task::{spawn, spawn_blocking};
+    use tokio::{
+        task::{spawn, spawn_blocking},
+        time::delay_for,
+    };
     use warp::{
         header,
         http::{HeaderValue, StatusCode},
+        hyper::Body,
         path,
         reply::Response,
         Filter,
@@ -1265,6 +1300,101 @@ mod tests {
             .await?;
         });
         Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_download_big_file() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
+        let routes = path!("file" / u64 / usize).map(|delay, chunk_size| {
+            let (mut sender, body) = Body::channel();
+            spawn(async move {
+                for _ in 0..100 {
+                    delay_for(Duration::from_millis(delay)).await;
+                    if sender
+                        .send_data(rand_data(chunk_size).into())
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+            Response::new(body)
+        });
+        starts_with_server!(addr, routes, {
+            let io_urls = vec![format!("http://{}", addr)];
+            let downloader = RangeReader::builder(
+                "bucket",
+                "file/200/200000",
+                get_credential(),
+                io_urls.to_owned(),
+            )
+            .use_getfile_api(false)
+            .normalize_key(true)
+            .io_tries(1)
+            .low_speed_duration(Duration::from_secs(3))
+            .base_low_speed_limit(1 << 20)
+            .build();
+            spawn_blocking(move || {
+                let err = downloader.download().unwrap_err().into_inner().unwrap();
+                let err = err.downcast_ref::<IOError>().unwrap();
+                assert_eq!(err.kind(), IOErrorKind::TimedOut);
+                assert_eq!(
+                    &err.to_string(),
+                    "request or operation took longer than the configured timeout time"
+                );
+            })
+            .await?;
+
+            let downloader = RangeReader::builder(
+                "bucket",
+                "file/200/250000",
+                get_credential(),
+                io_urls.to_owned(),
+            )
+            .use_getfile_api(false)
+            .normalize_key(true)
+            .io_tries(1)
+            .low_speed_duration(Duration::from_secs(3))
+            .base_low_speed_limit(1 << 20)
+            .build();
+            spawn_blocking(move || {
+                assert!(downloader.download().is_ok());
+            })
+            .await?;
+
+            let downloader = RangeReader::builder(
+                "bucket",
+                "file/4000/3000000",
+                get_credential(),
+                io_urls.to_owned(),
+            )
+            .use_getfile_api(false)
+            .normalize_key(true)
+            .io_tries(1)
+            .low_speed_duration(Duration::from_secs(3))
+            .base_low_speed_limit(1 << 20)
+            .build();
+            spawn_blocking(move || {
+                let err = downloader.download().unwrap_err().into_inner().unwrap();
+                let err = err.downcast_ref::<IsahcError>().unwrap();
+                assert_eq!(err.kind(), IsahcErrorKind::Timeout);
+                assert_eq!(
+                    &err.to_string(),
+                    "request or operation took longer than the configured timeout time"
+                );
+            })
+            .await?;
+        });
+        return Ok(());
+
+        #[inline]
+        fn rand_data(size: usize) -> Vec<u8> {
+            let mut rand_data = vec![0u8; size];
+            thread_rng().fill_bytes(&mut rand_data);
+            rand_data
+        }
     }
 
     #[tokio::test]
