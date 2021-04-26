@@ -8,6 +8,7 @@ use super::{
 };
 use log::{debug, warn};
 use multipart::server::Multipart;
+use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use reqwest::{
     blocking::{RequestBuilder as HTTPRequestBuilder, Response as HTTPResponse},
@@ -20,6 +21,7 @@ use std::{
         Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
+    sync::Arc,
     thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -72,10 +74,15 @@ pub fn sign_download_url_with_lifetime(
 /// 对象范围下载器
 #[derive(Debug)]
 pub struct RangeReader {
+    inner: Arc<RangeReaderInner>,
+    key: String,
+}
+
+#[derive(Debug)]
+struct RangeReaderInner {
     io_selector: HostSelector,
     credential: Credential,
     bucket: String,
-    key: String,
     tries: usize,
     use_getfile_api: bool,
     private_url_lifetime: Option<Duration>,
@@ -219,6 +226,11 @@ impl RangeReaderBuilder {
     /// 构建范围下载器
     #[inline]
     pub fn build(self) -> RangeReader {
+        let (inner, key) = self.build_inner_and_key();
+        RangeReader { inner, key }
+    }
+
+    fn build_inner_and_key(self) -> (Arc<RangeReaderInner>, String) {
         let io_querier = if self.uc_urls.is_empty() {
             None
         } else {
@@ -255,15 +267,17 @@ impl RangeReaderBuilder {
             .base_timeout(self.base_timeout)
             .build();
 
-        RangeReader {
-            io_selector,
-            credential: self.credential,
-            bucket: self.bucket,
-            key: self.key,
-            tries: self.io_tries,
-            use_getfile_api: self.use_getfile_api,
-            private_url_lifetime: self.private_url_lifetime,
-        }
+        (
+            Arc::new(RangeReaderInner {
+                io_selector,
+                credential: self.credential,
+                bucket: self.bucket,
+                tries: self.io_tries,
+                use_getfile_api: self.use_getfile_api,
+                private_url_lifetime: self.private_url_lifetime,
+            }),
+            self.key,
+        )
     }
 
     /// 从配置创建范围下载构建器
@@ -314,7 +328,15 @@ impl RangeReader {
     /// * `key` - 对象名称
     #[inline]
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
-        RangeReaderBuilder::from_env(key).map(|b| b.build())
+        static RANGE_READER_INNER: Lazy<Option<Arc<RangeReaderInner>>> = Lazy::new(|| {
+            RangeReaderBuilder::from_env(String::new())
+                .map(|b| b.build_inner_and_key())
+                .map(|v| v.0)
+        });
+        RANGE_READER_INNER.as_ref().map(|inner| Self {
+            inner: inner.to_owned(),
+            key: key.into(),
+        })
     }
 }
 
@@ -726,23 +748,23 @@ impl RangeReader {
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
         let now = SystemTime::now();
-        assert!(self.tries > 0);
+        assert!(self.inner.tries > 0);
 
-        for tries in 0..self.tries {
+        for tries in 0..self.inner.tries {
             sleep_before_retry(tries);
-            let last_try = self.tries - tries <= 1;
+            let last_try = self.inner.tries - tries <= 1;
 
-            let chosen_io_info = self.io_selector.select_host();
+            let chosen_io_info = self.inner.io_selector.select_host();
             let download_url = sign_download_url_if_needed(
                 &make_download_url(
                     &chosen_io_info.host,
-                    self.credential.access_key(),
-                    &self.bucket,
+                    self.inner.credential.access_key(),
+                    &self.inner.bucket,
                     &self.key,
-                    self.use_getfile_api,
+                    self.inner.use_getfile_api,
                 ),
-                self.private_url_lifetime,
-                &self.credential,
+                self.inner.private_url_lifetime,
+                &self.inner.credential,
             );
             let request_builder = HTTP_CLIENT
                 .request(method.to_owned(), download_url.to_owned())
@@ -750,11 +772,11 @@ impl RangeReader {
                 .timeout(chosen_io_info.timeout);
             match for_each_url(request_builder, download_url.as_str(), &chosen_io_info.host) {
                 Ok(result) => {
-                    self.io_selector.reward(&chosen_io_info.host);
+                    self.inner.io_selector.reward(&chosen_io_info.host);
                     return Ok(result);
                 }
                 Err(err) => {
-                    let punished = self.io_selector.punish(&chosen_io_info.host, &err);
+                    let punished = self.inner.io_selector.punish(&chosen_io_info.host, &err);
                     if !punished || last_try {
                         final_error(&err, download_url.as_str());
                         return Err(err);
@@ -818,7 +840,7 @@ impl RangeReader {
     #[inline]
     fn increase_timeout_power_if_needed(&self, host: &str, err: &ReqwestError) {
         if err.is_timeout() {
-            self.io_selector.increase_timeout_power(host)
+            self.inner.io_selector.increase_timeout_power(host)
         }
     }
 }

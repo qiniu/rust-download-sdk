@@ -7,11 +7,12 @@ use std::{
     io::{Error as IOError, Result as IOResult},
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
-        Arc, RwLock,
+        Arc, Mutex, RwLock,
     },
-    thread::{sleep, Builder as ThreadBuilder},
-    time::{Duration, SystemTime},
+    thread::Builder as ThreadBuilder,
+    time::{Duration, Instant, SystemTime},
 };
+use tap::prelude::*;
 
 #[derive(Debug)]
 struct PunishedInfo {
@@ -35,38 +36,40 @@ type UpdateFn = Box<dyn Fn() -> IOResult<Vec<String>> + Sync + Send + 'static>;
 struct HostsUpdater {
     hosts: RwLock<Vec<String>>,
     hosts_map: DashMap<String, PunishedInfo>,
-    update_func: Option<UpdateFn>,
+    update_option: Option<UpdateOption>,
     index: AtomicUsize,
     current_timeout_power: AtomicUsize,
 }
 
+struct UpdateOption {
+    func: UpdateFn,
+    interval: Duration,
+    last_updated_at: Mutex<Instant>,
+}
+
+impl UpdateOption {
+    #[inline]
+    fn new(func: UpdateFn, interval: Duration) -> Self {
+        Self {
+            func,
+            interval,
+            last_updated_at: Mutex::new(Instant::now()),
+        }
+    }
+}
+
 impl HostsUpdater {
-    fn new(hosts: Vec<String>, update_func: Option<UpdateFn>) -> Arc<Self> {
+    fn new(hosts: Vec<String>, update_option: Option<UpdateOption>) -> Arc<Self> {
         Arc::new(Self {
             hosts_map: hosts
                 .iter()
                 .map(|host| (host.to_owned(), Default::default()))
                 .collect(),
             hosts: RwLock::new(hosts),
-            update_func,
+            update_option,
             index: AtomicUsize::new(0),
             current_timeout_power: AtomicUsize::new(0),
         })
-    }
-
-    fn start_auto_update(updater: &Arc<HostsUpdater>, update_interval: Duration) {
-        let updater = Arc::downgrade(updater);
-        ThreadBuilder::new()
-            .name("host-selector-auto-updater".into())
-            .spawn(move || loop {
-                sleep(update_interval);
-                if let Some(updater) = updater.upgrade() {
-                    updater.update_hosts();
-                } else {
-                    break;
-                }
-            })
-            .unwrap();
     }
 
     fn set_hosts(&self, mut hosts: Vec<String>) {
@@ -81,20 +84,53 @@ impl HostsUpdater {
         *self.hosts.write().unwrap() = hosts;
     }
 
-    fn update_hosts(&self) {
-        if let Some(update_func) = &self.update_func {
-            let new_hosts = update_func();
-            if let Ok(new_hosts) = new_hosts {
+    fn update_hosts(&self) -> bool {
+        if let Some(update_option) = &self.update_option {
+            if let Ok(new_hosts) = (update_option.func)() {
                 if !new_hosts.is_empty() {
                     self.set_hosts(new_hosts);
+                    return true;
                 }
             }
         }
+        return false;
     }
 
     #[inline]
-    fn next_index(&self) -> usize {
-        self.index.fetch_add(1, Relaxed)
+    fn next_index(updater: &Arc<HostsUpdater>) -> usize {
+        return updater.index.fetch_add(1, Relaxed).tap(|_| {
+            try_to_auto_update(updater);
+        });
+
+        fn try_to_auto_update(updater: &Arc<HostsUpdater>) {
+            if let Some(update_option) = &updater.update_option {
+                if let Ok(last_updated_at) = update_option.last_updated_at.try_lock() {
+                    if last_updated_at.elapsed() >= update_option.interval {
+                        let updater = updater.to_owned();
+                        drop(last_updated_at);
+                        if let Err(err) = ThreadBuilder::new()
+                            .name("host-selector-auto-updater".into())
+                            .spawn(move || try_to_auto_update_in_thread(updater))
+                        {
+                            debug!("failed to start thread `host-selector-auto-updater` to update hosts: {:?}",err);
+                        }
+                    }
+                }
+            }
+        }
+
+        fn try_to_auto_update_in_thread(updater: Arc<HostsUpdater>) {
+            if let Some(update_option) = &updater.update_option {
+                if let Ok(mut last_updated_at) = update_option.last_updated_at.try_lock() {
+                    if last_updated_at.elapsed() >= update_option.interval {
+                        if updater.update_hosts() {
+                            debug!("`host-selector-auto-updater` update hosts successfully");
+                        };
+                        *last_updated_at = Instant::now();
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -241,13 +277,17 @@ impl HostSelectorBuilder {
     pub(super) fn build(self) -> HostSelector {
         let auto_update_enabled = self.update_func.is_some();
         let is_hosts_empty = self.hosts.is_empty();
-        let hosts_updater = HostsUpdater::new(self.hosts, self.update_func);
+        let update_interval = self.update_interval;
+        let hosts_updater = HostsUpdater::new(
+            self.hosts,
+            self.update_func
+                .map(|f| UpdateOption::new(f, update_interval)),
+        );
 
         if auto_update_enabled {
             if is_hosts_empty {
                 hosts_updater.update_hosts();
             }
-            HostsUpdater::start_auto_update(&hosts_updater, self.update_interval);
         }
 
         HostSelector {
@@ -285,7 +325,7 @@ impl HostSelector {
         let hosts = self.hosts_updater.hosts.read().unwrap();
         let max_seek_times = self.host_punisher.max_seek_times(hosts.len());
         for seek_times in 0..=max_seek_times {
-            let index = self.hosts_updater.next_index();
+            let index = HostsUpdater::next_index(&self.hosts_updater);
             let host = hosts[index % hosts.len()].as_str();
             current_host_info = Some(CurrentHostInfo {
                 host,
@@ -370,7 +410,7 @@ impl HostSelector {
 
 #[cfg(test)]
 mod tests {
-    use std::{io::ErrorKind as IOErrorKind, sync::Mutex};
+    use std::{io::ErrorKind as IOErrorKind, sync::Mutex, thread::sleep};
 
     use super::*;
 
@@ -384,14 +424,17 @@ mod tests {
                 "http://host2".to_owned(),
                 "http://host3".to_owned(),
             ],
-            Some(Box::new(|| {
-                Ok(vec![
-                    "http://host1".to_owned(),
-                    "http://host2".to_owned(),
-                    "http://host4".to_owned(),
-                    "http://host5".to_owned(),
-                ])
-            })),
+            Some(UpdateOption::new(
+                Box::new(|| {
+                    Ok(vec![
+                        "http://host1".to_owned(),
+                        "http://host2".to_owned(),
+                        "http://host4".to_owned(),
+                        "http://host5".to_owned(),
+                    ])
+                }),
+                Duration::from_secs(10),
+            )),
         );
         assert_eq!(hosts_updater.hosts.read().unwrap().len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
@@ -436,19 +479,24 @@ mod tests {
                 "http://host2".to_owned(),
                 "http://host3".to_owned(),
             ],
-            Some(Box::new(|| {
-                Ok(vec![
-                    "http://host1".to_owned(),
-                    "http://host2".to_owned(),
-                    "http://host4".to_owned(),
-                    "http://host5".to_owned(),
-                ])
-            })),
+            Some(UpdateOption::new(
+                Box::new(|| {
+                    Ok(vec![
+                        "http://host1".to_owned(),
+                        "http://host2".to_owned(),
+                        "http://host4".to_owned(),
+                        "http://host5".to_owned(),
+                    ])
+                }),
+                Duration::from_millis(500),
+            )),
         );
+        HostsUpdater::next_index(&hosts_updater);
         assert_eq!(hosts_updater.hosts.read().unwrap().len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
-        HostsUpdater::start_auto_update(&hosts_updater, Duration::from_millis(500));
-        sleep(Duration::from_millis(800));
+        sleep(Duration::from_millis(500));
+        HostsUpdater::next_index(&hosts_updater);
+        sleep(Duration::from_millis(500));
         assert_eq!(hosts_updater.hosts.read().unwrap().len(), 4);
         assert_eq!(hosts_updater.hosts_map.len(), 4);
         assert!(hosts_updater.hosts_map.get("http://host4").is_some());
