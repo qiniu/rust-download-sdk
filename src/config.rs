@@ -23,6 +23,7 @@ pub struct Config {
     uc_urls: Option<Vec<String>>,
 
     sim: Option<bool>,
+    normalize_key: Option<bool>,
     private: Option<bool>,
     retry: Option<usize>,
     punish_time_s: Option<u64>,
@@ -135,6 +136,10 @@ pub(super) fn build_range_reader_builder_from_config(
         builder = builder.use_getfile_api(!sim);
     }
 
+    if let Some(normalize_key) = config.normalize_key {
+        builder = builder.normalize_key(normalize_key);
+    }
+
     builder
 }
 
@@ -178,6 +183,7 @@ impl ConfigBuilder {
                 io_urls,
                 uc_urls: None,
                 sim: None,
+                normalize_key: None,
                 private: None,
                 retry: None,
                 punish_time_s: None,
@@ -204,6 +210,13 @@ impl ConfigBuilder {
     #[inline]
     pub fn use_getfile_api(mut self, use_getfile_api: Option<bool>) -> Self {
         self.inner.sim = use_getfile_api.map(|b| !b);
+        self
+    }
+
+    /// 是否对 key 进行格式化，默认为 false
+    #[inline]
+    pub fn normalize_key(mut self, normalize_key: Option<bool>) -> Self {
+        self.inner.normalize_key = normalize_key;
         self
     }
 
