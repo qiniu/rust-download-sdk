@@ -227,7 +227,7 @@ impl HostSelectorBuilder {
             hosts,
             update_func: None,
             should_punish_func: None,
-            update_interval: Duration::from_secs(5 * 60),
+            update_interval: Duration::from_secs(60),
             punish_duration: Duration::from_secs(30),
             base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,

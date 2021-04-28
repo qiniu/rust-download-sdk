@@ -133,7 +133,7 @@ impl RangeReaderBuilder {
             uc_urls: vec![],
             io_tries: 10,
             uc_tries: 10,
-            update_interval: Duration::from_secs(5 * 60),
+            update_interval: Duration::from_secs(60),
             punish_duration: Duration::from_secs(30),
             base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,
