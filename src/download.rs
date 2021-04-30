@@ -135,7 +135,7 @@ impl RangeReaderBuilder {
             uc_tries: 10,
             update_interval: Duration::from_secs(5 * 60),
             punish_duration: Duration::from_secs(30),
-            base_timeout: Duration::from_millis(500),
+            base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
             use_getfile_api: true,

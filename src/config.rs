@@ -42,7 +42,7 @@ pub fn is_qiniu_enabled() -> bool {
 }
 
 fn build_http_client() -> HTTPClient {
-    let mut base_timeout_ms = 500u64;
+    let mut base_timeout_ms = 3000u64;
     let mut dial_timeout_ms = 500u64;
     if let Some(config) = QINIU_CONFIG.as_ref() {
         if let Some(value) = config.base_timeout_ms {
@@ -241,7 +241,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置域名访问的基础超时时长，默认为 500 毫秒
+    /// 配置域名访问的基础超时时长，默认为 3000 毫秒
     #[inline]
     pub fn base_timeout(mut self, base_timeout: Option<Duration>) -> Self {
         self.inner.base_timeout_ms =
