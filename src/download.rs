@@ -22,7 +22,6 @@ use std::{
     },
     result::Result,
     sync::Arc,
-    thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use tap::prelude::*;
@@ -762,7 +761,6 @@ impl RangeReader {
         assert!(self.inner.tries > 0);
 
         for tries in 0..self.inner.tries {
-            sleep_before_retry(tries);
             let last_try = self.inner.tries - tries <= 1;
 
             let chosen_io_info = self.inner.io_selector.select_host();
@@ -839,15 +837,6 @@ impl RangeReader {
                 .unwrap()
             } else {
                 Url::parse(url).unwrap()
-            }
-        }
-
-        fn sleep_before_retry(tries: usize) {
-            if tries >= 3 {
-                let wait = 500 * (tries << 1) as u64;
-                if wait > 0 {
-                    sleep(Duration::from_millis(wait));
-                }
             }
         }
     }
