@@ -234,7 +234,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置域名访问失败后的惩罚时长，默认为 30 秒
+    /// 配置域名访问失败后的惩罚时长，默认为 30 分钟
     #[inline]
     pub fn punish_duration(mut self, punish_duration: Option<Duration>) -> Self {
         self.inner.punish_time_s = punish_duration.map(|d| d.as_secs());
