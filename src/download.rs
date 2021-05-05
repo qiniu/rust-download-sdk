@@ -854,10 +854,7 @@ impl RangeReader {
 
         fn sleep_before_retry(tries: usize) {
             if tries >= 3 {
-                let wait = 500 * (tries << 1) as u64;
-                if wait > 0 {
-                    sleep(Duration::from_millis(wait));
-                }
+                sleep(Duration::from_secs(tries as u64));
             }
         }
     }
