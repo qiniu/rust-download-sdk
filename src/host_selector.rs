@@ -364,12 +364,14 @@ impl HostSelector {
                         info!("host {} will not be selected because its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
                     } else {
                         info!("host {} is selected even its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                        break;
                     }
                 } else if !self.host_punisher.is_available(&punished_info) {
                     if seek_times < max_seek_times {
                         info!("host {} will not be selected because of too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
                     } else {
                         info!("host {} is selected even it has too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                        break;
                     }
                 } else {
                     info!(
