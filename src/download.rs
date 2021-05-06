@@ -1,6 +1,9 @@
 use super::{
     base::credential::Credential,
-    config::{build_range_reader_builder_from_config, build_range_reader_builder_from_env, Config},
+    config::{
+        build_range_reader_builder_from_config, build_range_reader_builder_from_env,
+        on_config_updated, Config,
+    },
     host_selector::HostSelector,
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
@@ -21,7 +24,7 @@ use std::{
         Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
-    sync::Arc,
+    sync::{Arc, RwLock},
     thread::sleep,
     time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -339,15 +342,29 @@ impl RangeReader {
     /// * `key` - 对象名称
     #[inline]
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
-        static RANGE_READER_INNER: Lazy<Option<Arc<RangeReaderInner>>> = Lazy::new(|| {
+        static RANGE_READER_INNER: Lazy<RwLock<Option<Arc<RangeReaderInner>>>> = Lazy::new(|| {
+            RwLock::new(build_range_reader_inner().tap(|_| {
+                on_config_updated(|| {
+                    *RANGE_READER_INNER.write().unwrap() = build_range_reader_inner();
+                    info!("RANGE_READER_INNER reloaded: {:?}", RANGE_READER_INNER);
+                })
+            }))
+        });
+        return RANGE_READER_INNER
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|inner| Self {
+                inner: inner.to_owned(),
+                key: key.into(),
+            });
+
+        #[inline]
+        fn build_range_reader_inner() -> Option<Arc<RangeReaderInner>> {
             RangeReaderBuilder::from_env(String::new())
                 .map(|b| b.build_inner_and_key())
                 .map(|v| v.0)
-        });
-        RANGE_READER_INNER.as_ref().map(|inner| Self {
-            inner: inner.to_owned(),
-            key: key.into(),
-        })
+        }
     }
 }
 
@@ -835,6 +852,8 @@ impl RangeReader {
                 &self.inner.credential,
             );
             let request_builder = HTTP_CLIENT
+                .read()
+                .unwrap()
                 .request(method.to_owned(), download_url.to_owned())
                 .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .timeout(chosen_io_info.timeout);
