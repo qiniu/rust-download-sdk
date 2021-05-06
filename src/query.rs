@@ -1,8 +1,12 @@
 use super::{host_selector::HostSelector, HTTP_CLIENT};
 use dashmap::DashMap;
 use directories::BaseDirs;
+use isahc::{
+    config::Configurable,
+    http::{Method, StatusCode},
+    ReadResponseExt, Request,
+};
 use once_cell::sync::Lazy;
-use reqwest::StatusCode;
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -20,7 +24,6 @@ use std::{
     thread::spawn,
     time::{Duration, SystemTime},
 };
-use tap::prelude::*;
 use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -109,14 +112,20 @@ static CACHE_INIT: Lazy<()> = Lazy::new(|| {
 pub(super) struct HostsQuerier {
     uc_selector: HostSelector,
     uc_tries: usize,
+    low_speed_duration: Duration,
 }
 
 impl HostsQuerier {
     #[inline]
-    pub(super) fn new(uc_selector: HostSelector, uc_tries: usize) -> Self {
+    pub(super) fn new(
+        uc_selector: HostSelector,
+        uc_tries: usize,
+        low_speed_duration: Duration,
+    ) -> Self {
         Self {
             uc_selector,
             uc_tries,
+            low_speed_duration,
         }
     }
 
@@ -157,8 +166,13 @@ impl HostsQuerier {
         let cache_value = CACHE_MAP
             .entry(cache_key.to_owned())
             .or_try_insert_with(|| {
-                let result =
-                    query_for_domains_without_cache(ak, bucket, &self.uc_selector, self.uc_tries);
+                let result = query_for_domains_without_cache(
+                    ak,
+                    bucket,
+                    &self.uc_selector,
+                    self.uc_tries,
+                    self.low_speed_duration,
+                );
                 if result.is_ok() {
                     modified = true;
                 }
@@ -170,13 +184,18 @@ impl HostsQuerier {
             let bucket = bucket.to_owned();
             let uc_selector = self.uc_selector.to_owned();
             let uc_tries = self.uc_tries;
+            let low_speed_duration = self.low_speed_duration;
             spawn(move || {
                 let mut modified = false;
                 CACHE_MAP.entry(cache_key).and_modify(|cache_value| {
                     if cache_value.cache_deadline < SystemTime::now() {
-                        if let Ok(new_cache_value) =
-                            query_for_domains_without_cache(ak, bucket, &uc_selector, uc_tries)
-                        {
+                        if let Ok(new_cache_value) = query_for_domains_without_cache(
+                            ak,
+                            bucket,
+                            &uc_selector,
+                            uc_tries,
+                            low_speed_duration,
+                        ) {
                             *cache_value = new_cache_value;
                             modified = true;
                         }
@@ -201,25 +220,26 @@ fn query_for_domains_without_cache(
     bucket: impl AsRef<str>,
     uc_selector: &HostSelector,
     uc_tries: usize,
+    low_speed_duration: Duration,
 ) -> IOResult<CacheValue> {
-    return query_with_retry(uc_selector, uc_tries, |host, timeout| {
+    return query_with_retry(uc_selector, uc_tries, |host, low_speed_limit| {
         let url = Url::parse_with_params(
             &format!("{}/v4/query", host),
             &[("ak", ak.as_ref()), ("bucket", bucket.as_ref())],
         )
         .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
 
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri(&url.to_string())
+            .low_speed_timeout(low_speed_limit, low_speed_duration)
+            .body(())
+            .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
+
         HTTP_CLIENT
-            .get(&url.to_string())
-            .timeout(timeout)
-            .send()
-            .tap_err(|err| {
-                if err.is_timeout() {
-                    uc_selector.increase_timeout_power(host);
-                }
-            })
+            .send(request)
             .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-            .and_then(|resp| {
+            .and_then(|mut resp| {
                 if resp.status() != StatusCode::OK {
                     Err(IOError::new(
                         IOErrorKind::Other,
@@ -247,12 +267,12 @@ fn query_for_domains_without_cache(
     fn query_with_retry<T>(
         uc_selector: &HostSelector,
         tries: usize,
-        mut for_each_host: impl FnMut(&str, Duration) -> IOResult<T>,
+        mut for_each_host: impl FnMut(&str, u32) -> IOResult<T>,
     ) -> IOResult<T> {
         let mut last_error = None;
         for _ in 0..tries {
             let host_info = uc_selector.select_host();
-            match for_each_host(&host_info.host, host_info.timeout) {
+            match for_each_host(&host_info.host, host_info.low_speed_limit) {
                 Ok(response) => {
                     uc_selector.reward(&host_info.host);
                     return Ok(response);
@@ -393,11 +413,8 @@ mod tests {
             spawn_blocking(move || -> IOResult<()> {
                 let host_selector =
                     HostSelector::builder(vec!["http://".to_owned() + &addr.to_string()]).build();
-                let io_urls = HostsQuerier::new(host_selector, 1).query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    false,
-                )?;
+                let io_urls = HostsQuerier::new(host_selector, 1, Duration::from_secs(3))
+                    .query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 Ok(())
             })
@@ -446,7 +463,7 @@ mod tests {
             spawn_blocking(move || -> IOResult<()> {
                 let host_selector =
                     HostSelector::builder(vec!["http://".to_owned() + &addr.to_string()]).build();
-                let hosts_querier = HostsQuerier::new(host_selector, 1);
+                let hosts_querier = HostsQuerier::new(host_selector, 1, Duration::from_secs(3));
                 let mut io_urls =
                     hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
