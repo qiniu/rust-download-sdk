@@ -2,6 +2,7 @@ use dashmap::DashMap;
 use log::{info, warn};
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
+    cmp::min,
     collections::HashSet,
     fmt::{Debug, Formatter, Result as FormatResult},
     io::{Error as IOError, ErrorKind as IOErrorKind, Read, Result as IOResult},
@@ -176,7 +177,11 @@ impl HostPunisher {
 
     #[inline]
     fn timeout(&self, punished_info: &PunishedInfo) -> Duration {
-        self.base_timeout * (1 << punished_info.timeout_power)
+        min(
+            // 超时时长有上限，否则可能超过 tokio 极限
+            self.base_timeout * (1 << punished_info.timeout_power),
+            Duration::from_secs(300),
+        )
     }
 
     #[inline]
