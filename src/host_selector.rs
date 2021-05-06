@@ -138,6 +138,11 @@ impl HostsUpdater {
     pub fn increase_timeout_power(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
             punished_info.timeout_power += 1;
+            punished_info.last_punished_at = SystemTime::now();
+            info!(
+                "The timeout_power of host {} increases, now is {}",
+                host, punished_info.timeout_power
+            );
         }
     }
 }
@@ -364,12 +369,14 @@ impl HostSelector {
                         info!("host {} will not be selected because its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
                     } else {
                         info!("host {} is selected even its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                        break;
                     }
                 } else if !self.host_punisher.is_available(&punished_info) {
                     if seek_times < max_seek_times {
                         info!("host {} will not be selected because of too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
                     } else {
                         info!("host {} is selected even it has too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                        break;
                     }
                 } else {
                     info!(
@@ -401,6 +408,10 @@ impl HostSelector {
             let timeout_power = punished_info.timeout_power;
             *punished_info = Default::default();
             punished_info.timeout_power = timeout_power.saturating_sub(1);
+            info!(
+                "Reward host {}, now timeout_power is {}",
+                host, punished_info.timeout_power
+            );
         }
     }
 
@@ -409,6 +420,10 @@ impl HostSelector {
             if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
                 punished_info.continuous_punished_times += 1;
                 punished_info.last_punished_at = SystemTime::now();
+                info!(
+                    "Punish host {}, now continuous_punished_times is {}, and timeout_power is {}",
+                    host, punished_info.continuous_punished_times, punished_info.timeout_power
+                );
             }
             true
         } else {
