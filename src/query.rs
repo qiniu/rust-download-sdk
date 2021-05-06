@@ -210,6 +210,8 @@ fn query_for_domains_without_cache(
         .map_err(|err| IOError::new(IOErrorKind::InvalidInput, err))?;
 
         HTTP_CLIENT
+            .read()
+            .unwrap()
             .get(&url.to_string())
             .timeout(timeout)
             .send()

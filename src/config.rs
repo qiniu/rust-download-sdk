@@ -1,13 +1,22 @@
-use std::{convert::TryInto, env, fs, time::Duration, u64};
-
 use super::{base::credential::Credential, download::RangeReaderBuilder};
-use log::{error, warn};
-use once_cell::sync::Lazy;
+use log::{error, info, warn};
+use notify::{watcher, DebouncedEvent, RecursiveMode, Result as NotifyResult, Watcher};
+use once_cell::sync::{Lazy, OnceCell};
 use reqwest::blocking::Client as HTTPClient;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use std::{
+    convert::TryInto,
+    env, fs,
+    path::{Path, PathBuf},
+    sync::{mpsc::channel, RwLock},
+    thread::{Builder as ThreadBuilder, JoinHandle},
+    time::Duration,
+    u64,
+};
+use tap::prelude::*;
 
 /// 七牛配置信息
-#[derive(Deserialize, Debug)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Config {
     #[serde(alias = "ak")]
     access_key: String,
@@ -30,21 +39,37 @@ pub struct Config {
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
 }
-static QINIU_CONFIG: Lazy<Option<Config>> = Lazy::new(load_config);
-pub(super) static HTTP_CLIENT: Lazy<HTTPClient> = Lazy::new(build_http_client);
+static QINIU_CONFIG: Lazy<RwLock<Option<Config>>> = Lazy::new(|| {
+    RwLock::new(load_config()).tap(|_| {
+        on_config_updated(|| {
+            if let Some(config) = load_config() {
+                *QINIU_CONFIG.write().unwrap() = Some(config);
+            }
+            info!("QINIU_CONFIG reloaded: {:?}", QINIU_CONFIG);
+        })
+    })
+});
+pub(super) static HTTP_CLIENT: Lazy<RwLock<HTTPClient>> = Lazy::new(|| {
+    RwLock::new(build_http_client()).tap(|_| {
+        on_config_updated(|| {
+            *HTTP_CLIENT.write().unwrap() = build_http_client();
+            info!("HTTP_CLIENT reloaded: {:?}", HTTP_CLIENT);
+        })
+    })
+});
 
 /// 判断当前是否已经启用七牛环境
 ///
 /// 如果当前没有设置 QINIU 环境变量，或加载该环境变量出现错误，则返回 false
 #[inline]
 pub fn is_qiniu_enabled() -> bool {
-    QINIU_CONFIG.is_some()
+    QINIU_CONFIG.read().unwrap().is_some()
 }
 
 fn build_http_client() -> HTTPClient {
     let mut base_timeout_ms = 3000u64;
     let mut dial_timeout_ms = 500u64;
-    if let Some(config) = QINIU_CONFIG.as_ref() {
+    if let Some(config) = QINIU_CONFIG.read().unwrap().as_ref() {
         if let Some(value) = config.base_timeout_ms {
             if value > 0 {
                 base_timeout_ms = value;
@@ -67,8 +92,10 @@ fn build_http_client() -> HTTPClient {
         .expect("Failed to build Reqwest Client")
 }
 
+const QINIU_ENV: &str = "QINIU";
+
 fn load_config() -> Option<Config> {
-    if let Ok(qiniu_config_path) = env::var("QINIU") {
+    if let Ok(qiniu_config_path) = env::var(QINIU_ENV) {
         if let Ok(qiniu_config) = fs::read(&qiniu_config_path) {
             let qiniu_config: Option<Config> = if qiniu_config_path.ends_with(".toml") {
                 toml::from_slice(&qiniu_config).ok()
@@ -76,22 +103,83 @@ fn load_config() -> Option<Config> {
                 serde_json::from_slice(&qiniu_config).ok()
             };
             if let Some(qiniu_config) = qiniu_config {
-                Some(qiniu_config)
+                setup_config_watcher(&qiniu_config_path);
+                return Some(qiniu_config);
             } else {
                 error!(
                     "Qiniu config file cannot be deserialized: {}",
                     qiniu_config_path
                 );
-                None
+                return None;
             }
         } else {
             error!("Qiniu config file cannot be open: {}", qiniu_config_path);
-            None
+            return None;
         }
     } else {
         warn!("QINIU Env IS NOT ENABLED");
-        None
+        return None;
     }
+
+    fn setup_config_watcher(config_path: impl Into<PathBuf>) {
+        let config_path = config_path.into();
+        static UNIQUE_THREAD: OnceCell<JoinHandle<()>> = OnceCell::new();
+
+        if let Err(err) = UNIQUE_THREAD.get_or_try_init(|| {
+            ThreadBuilder::new()
+                .name("qiniu-config-watcher".into())
+                .spawn(move || {
+                    if let Err(err) = setup_config_watcher_inner(&config_path) {
+                        error!("Qiniu config file watcher was setup failed: {:?}", err);
+                    }
+                })
+        }) {
+            error!(
+                "Failed to start thread to watch Qiniu config file: {:?}",
+                err
+            );
+        }
+
+        fn setup_config_watcher_inner(config_path: &Path) -> NotifyResult<()> {
+            let (tx, rx) = channel();
+            let mut watcher = watcher(tx, Duration::from_millis(500))?;
+            watcher.watch(config_path, RecursiveMode::NonRecursive)?;
+
+            info!("Qiniu config file watcher was setup");
+
+            loop {
+                match rx.recv() {
+                    Ok(event) => match event {
+                        DebouncedEvent::Create(_) | DebouncedEvent::Write(_) => {
+                            info!("Received event {:?} from Qiniu config file watcher", event);
+                            for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
+                                handle();
+                            }
+                        }
+                        DebouncedEvent::Error(err, _) => {
+                            error!(
+                                "Received error event from Qiniu config file watcher: {:?}",
+                                err
+                            );
+                        }
+                        _ => {}
+                    },
+                    Err(err) => {
+                        error!(
+                            "Failed to receive event from Qiniu config file watcher: {:?}",
+                            err
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+static CONFIG_UPDATE_HANDLERS: Lazy<RwLock<Vec<fn()>>> = Lazy::new(|| RwLock::new(Vec::new()));
+
+pub(super) fn on_config_updated(handle: fn()) {
+    CONFIG_UPDATE_HANDLERS.write().unwrap().push(handle);
 }
 
 pub(super) fn build_range_reader_builder_from_config(
@@ -145,6 +233,8 @@ pub(super) fn build_range_reader_builder_from_config(
 
 pub(super) fn build_range_reader_builder_from_env(key: String) -> Option<RangeReaderBuilder> {
     QINIU_CONFIG
+        .read()
+        .unwrap()
         .as_ref()
         .map(|qiniu_config| build_range_reader_builder_from_config(key, qiniu_config))
 }
@@ -255,5 +345,83 @@ impl ConfigBuilder {
         self.inner.dial_timeout_ms =
             connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        error::Error,
+        fs::{remove_file, OpenOptions},
+        io::Write,
+        sync::atomic::{AtomicUsize, Ordering::Relaxed},
+        thread::sleep,
+    };
+    use tempfile::Builder as TempFileBuilder;
+
+    #[test]
+    fn test_load_config() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
+        let mut config = Config {
+            access_key: "test-ak-1".into(),
+            secret_key: "test-sk-1".into(),
+            bucket: "test-bucket-1".into(),
+            io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
+            uc_urls: Default::default(),
+            sim: Default::default(),
+            normalize_key: Default::default(),
+            private: Default::default(),
+            retry: Default::default(),
+            punish_time_s: Default::default(),
+            base_timeout_ms: Default::default(),
+            dial_timeout_ms: Default::default(),
+        };
+        let tempfile_path = {
+            let mut tempfile = TempFileBuilder::new().suffix(".toml").tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            env::set_var(QINIU_ENV, tempfile.path().as_os_str());
+            tempfile.into_temp_path()
+        };
+
+        static UPDATED: AtomicUsize = AtomicUsize::new(0);
+        UPDATED.store(0, Relaxed);
+
+        let loaded = load_config().unwrap();
+        assert_eq!(loaded, config);
+
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+
+        sleep(Duration::from_secs(1));
+
+        config.access_key = "test-ak-2".into();
+        config.secret_key = "test-sk-2".into();
+        config.bucket = "test-bucket-2".into();
+
+        {
+            let mut tempfile = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&tempfile_path)?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+        }
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 3);
+
+        remove_file(tempfile_path)?;
+
+        Ok(())
     }
 }
