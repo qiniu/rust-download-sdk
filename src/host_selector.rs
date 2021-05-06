@@ -1,10 +1,11 @@
 use dashmap::DashMap;
-use log::debug;
+use log::{info, warn};
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
+    cmp::min,
     collections::HashSet,
     fmt::{Debug, Formatter, Result as FormatResult},
-    io::{Error as IOError, Result as IOResult},
+    io::{Error as IOError, ErrorKind as IOErrorKind, Read, Result as IOResult},
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc, Mutex, RwLock,
@@ -112,7 +113,7 @@ impl HostsUpdater {
                             .name("host-selector-auto-updater".into())
                             .spawn(move || try_to_auto_update_in_thread(updater))
                         {
-                            debug!("failed to start thread `host-selector-auto-updater` to update hosts: {:?}",err);
+                            warn!("failed to start thread `host-selector-auto-updater` to update hosts: {:?}",err);
                         }
                     }
                 }
@@ -124,12 +125,19 @@ impl HostsUpdater {
                 if let Ok(mut last_updated_at) = update_option.last_updated_at.try_lock() {
                     if last_updated_at.elapsed() >= update_option.interval {
                         if updater.update_hosts() {
-                            debug!("`host-selector-auto-updater` update hosts successfully");
+                            info!("`host-selector-auto-updater` update hosts successfully");
                         };
                         *last_updated_at = Instant::now();
                     }
                 }
             }
+        }
+    }
+
+    #[inline]
+    pub fn increase_timeout_power(&self, host: &str) {
+        if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
+            punished_info.timeout_power += 1;
         }
     }
 }
@@ -169,7 +177,11 @@ impl HostPunisher {
 
     #[inline]
     fn timeout(&self, punished_info: &PunishedInfo) -> Duration {
-        self.base_timeout * (1 << punished_info.timeout_power)
+        min(
+            // 超时时长有上限，否则可能超过 tokio 极限
+            self.base_timeout * (1 << punished_info.timeout_power),
+            Duration::from_secs(300),
+        )
     }
 
     #[inline]
@@ -220,9 +232,9 @@ impl HostSelectorBuilder {
             hosts,
             update_func: None,
             should_punish_func: None,
-            update_interval: Duration::from_secs(5 * 60),
-            punish_duration: Duration::from_secs(30),
-            base_timeout: Duration::from_millis(500),
+            update_interval: Duration::from_secs(60),
+            punish_duration: Duration::from_secs(30 * 60),
+            base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
         }
@@ -332,13 +344,13 @@ impl HostSelector {
                 timeout: self.host_punisher.base_timeout,
                 timeout_power: 0,
             });
-            debug!(
+            info!(
                 "try to select host {}, timeout: {:?}",
                 host, self.host_punisher.base_timeout,
             );
             if let Some(punished_info) = self.hosts_updater.hosts_map.get(host) {
                 if self.host_punisher.is_punishment_expired(&punished_info) {
-                    debug!("host {} is selected directly because there is no punishment or punishment is expired", host);
+                    info!("host {} is selected directly because there is no punishment or punishment is expired", host);
                     break;
                 }
                 current_host_info = Some(CurrentHostInfo {
@@ -349,18 +361,18 @@ impl HostSelector {
                 let current_timeout_power = self.hosts_updater.current_timeout_power.load(Relaxed);
                 if current_timeout_power < punished_info.timeout_power {
                     if seek_times < max_seek_times {
-                        debug!("host {} will not be selected because its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                        info!("host {} will not be selected because its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
                     } else {
-                        debug!("host {} is selected even its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
+                        info!("host {} is selected even its timeout power({}) is larger than current one({})", host, current_timeout_power, punished_info.timeout_power);
                     }
                 } else if !self.host_punisher.is_available(&punished_info) {
                     if seek_times < max_seek_times {
-                        debug!("host {} will not be selected because of too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                        info!("host {} will not be selected because of too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
                     } else {
-                        debug!("host {} is selected even it has too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
+                        info!("host {} is selected even it has too many continuous_punished_times({})", host, punished_info.continuous_punished_times);
                     }
                 } else {
-                    debug!(
+                    info!(
                         "host {} is selected, timeout: {:?}, timeout power: {:?}",
                         host,
                         self.host_punisher.timeout(&punished_info),
@@ -383,9 +395,12 @@ impl HostSelector {
             .unwrap()
     }
 
+    #[inline]
     pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
+            let timeout_power = punished_info.timeout_power;
             *punished_info = Default::default();
+            punished_info.timeout_power = timeout_power.saturating_sub(1);
         }
     }
 
@@ -401,9 +416,41 @@ impl HostSelector {
         }
     }
 
+    #[inline]
     pub(super) fn increase_timeout_power(&self, host: &str) {
-        if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
-            punished_info.timeout_power += 1;
+        self.hosts_updater.increase_timeout_power(host)
+    }
+
+    #[inline]
+    pub(super) fn wrap_reader<'a, R: Read>(
+        &'a self,
+        reader: R,
+        host: &'a str,
+    ) -> ReaderWithTimeoutPower<'a, R> {
+        ReaderWithTimeoutPower {
+            reader,
+            host,
+            hosts_updater: &self.hosts_updater,
+        }
+    }
+}
+
+pub(super) struct ReaderWithTimeoutPower<'a, R: Read> {
+    reader: R,
+    hosts_updater: &'a HostsUpdater,
+    host: &'a str,
+}
+
+impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
+    #[inline]
+    fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
+        match self.reader.read(buf) {
+            Ok(have_read) => Ok(have_read),
+            Err(err) if err.kind() == IOErrorKind::TimedOut => {
+                self.hosts_updater.increase_timeout_power(self.host);
+                Err(err)
+            }
+            Err(err) => Err(err),
         }
     }
 }

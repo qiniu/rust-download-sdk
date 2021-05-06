@@ -42,7 +42,7 @@ pub fn is_qiniu_enabled() -> bool {
 }
 
 fn build_http_client() -> HTTPClient {
-    let mut base_timeout_ms = 500u64;
+    let mut base_timeout_ms = 3000u64;
     let mut dial_timeout_ms = 500u64;
     if let Some(config) = QINIU_CONFIG.as_ref() {
         if let Some(value) = config.base_timeout_ms {
@@ -234,14 +234,14 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置域名访问失败后的惩罚时长，默认为 30 秒
+    /// 配置域名访问失败后的惩罚时长，默认为 30 分钟
     #[inline]
     pub fn punish_duration(mut self, punish_duration: Option<Duration>) -> Self {
         self.inner.punish_time_s = punish_duration.map(|d| d.as_secs());
         self
     }
 
-    /// 配置域名访问的基础超时时长，默认为 500 毫秒
+    /// 配置域名访问的基础超时时长，默认为 3000 毫秒
     #[inline]
     pub fn base_timeout(mut self, base_timeout: Option<Duration>) -> Self {
         self.inner.base_timeout_ms =

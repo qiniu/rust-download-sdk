@@ -6,7 +6,7 @@ use super::{
     req_id::{get_req_id, REQUEST_ID_HEADER},
     HTTP_CLIENT,
 };
-use log::{debug, warn};
+use log::{debug, error, info, warn};
 use multipart::server::Multipart;
 use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
@@ -133,9 +133,9 @@ impl RangeReaderBuilder {
             uc_urls: vec![],
             io_tries: 10,
             uc_tries: 10,
-            update_interval: Duration::from_secs(5 * 60),
-            punish_duration: Duration::from_secs(30),
-            base_timeout: Duration::from_millis(500),
+            update_interval: Duration::from_secs(60),
+            punish_duration: Duration::from_secs(30 * 60),
+            base_timeout: Duration::from_millis(3000),
             max_punished_times: 5,
             max_punished_hosts_percent: 50,
             use_getfile_api: true,
@@ -362,8 +362,11 @@ impl ReadAt for RangeReader {
 
         self.with_retries(
             Method::GET,
-            |request_builder, download_url, chosen_host| {
-                debug!("read_at url: {}, range: {}", download_url, &range);
+            |tries, request_builder, download_url, chosen_host| {
+                debug!(
+                    "[{}] read_at url: {}, range: {}",
+                    tries, download_url, &range
+                );
 
                 let result = request_builder
                     .header(RANGE, &range)
@@ -377,20 +380,31 @@ impl ReadAt for RangeReader {
                         }
                         let content_length = parse_content_length(&resp);
                         let max_size = content_length.min(size);
-                        io_copy(&mut resp.take(max_size), &mut cursor)
-                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
+                        io_copy(
+                            &mut self.wrap_reader(resp.take(max_size), chosen_host),
+                            &mut cursor,
+                        )
+                        .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                     });
 
-                result.map(|size| size as usize).tap_err(|err| {
-                    warn!(
-                        "read_at error url: {}, range: {}, error: {}",
-                        download_url, range, err
-                    );
-                    cursor.set_position(0);
-                })
+                result
+                    .map(|size| size as usize)
+                    .tap_ok(|_| {
+                        info!(
+                            "[{}] read_at ok url: {}, range: {}",
+                            tries, download_url, range
+                        );
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] read_at error url: {}, range: {}, error: {}",
+                            tries, download_url, range, err
+                        );
+                        cursor.set_position(0);
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed read_at url = {}, error: {:?}",
                     download_url, err,
                 );
@@ -414,29 +428,30 @@ impl RangeReader {
 
         return self.with_retries(
             Method::GET,
-            |http_request_builder, download_url, chosen_host| {
+            |tries, http_request_builder, download_url, chosen_host| {
                 debug!(
-                    "read_multi_ranges url: {}, range: {:?}",
-                    download_url, ranges
+                    "[{}] read_multi_ranges url: {}, range: {:?}",
+                    tries, download_url, ranges
                 );
                 let result = http_request_builder
                     .header(RANGE, &range_header_value)
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .and_then(|mut resp| {
+                    .and_then(|resp| {
                         let mut parts = Vec::with_capacity(ranges.len());
                         match resp.status() {
                             StatusCode::OK => {
-                                let body = resp
-                                    .bytes()
+                                let mut body = Vec::new();
+                                self.wrap_reader(resp, chosen_host)
+                                    .read_to_end(&mut body)
                                     .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                                 for &(from, len) in ranges.iter() {
                                     let from = (from as usize).min(body.len());
                                     let len = (len as usize).min(body.len() - from);
                                     if len > 0 {
                                         parts.push(RangePart {
-                                            data: body.slice(from..(from + len)).to_vec(),
+                                            data: body[from..(from + len)].to_vec(),
                                             range: (from as u64, len as u64),
                                         });
                                     }
@@ -464,7 +479,8 @@ impl RangeReader {
                                         .to_owned()
                                     };
 
-                                    let mut multipart = Multipart::with_body(&mut resp, boundary);
+                                    let mut body = self.wrap_reader(resp, chosen_host);
+                                    let mut multipart = Multipart::with_body(&mut body, boundary);
                                     loop {
                                         match multipart.read_entry() {
                                             Ok(Some(mut field)) => {
@@ -527,7 +543,7 @@ impl RangeReader {
                                         })?;
                                     let len = to - from + 1;
                                     let mut data = Vec::with_capacity(len as usize);
-                                    resp.copy_to(&mut data).unwrap();
+                                    self.wrap_reader(resp, chosen_host).read_to_end(&mut data)?;
                                     parts.push(RangePart {
                                         data,
                                         range: (from, len),
@@ -541,15 +557,22 @@ impl RangeReader {
 
                         Ok(parts)
                     });
-                result.tap_err(|err| {
-                    warn!(
-                        "read_multi_ranges error url: {}, range: {:?}, error: {}",
-                        download_url, ranges, err
-                    );
-                })
+                result
+                    .tap_ok(|_| {
+                        info!(
+                            "[{}] read_multi_ranges ok url: {}, range: {:?}",
+                            tries, download_url, ranges
+                        );
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] read_multi_ranges error url: {}, range: {:?}, error: {}",
+                            tries, download_url, ranges, err
+                        );
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed read_multi_ranges url = {}, error: {:?}",
                     download_url, err,
                 );
@@ -584,8 +607,8 @@ impl RangeReader {
     pub fn exist(&self) -> IOResult<bool> {
         self.with_retries(
             Method::HEAD,
-            |request_builder, download_url, chosen_host| {
-                debug!("exist url: {}", download_url);
+            |tries, request_builder, download_url, chosen_host| {
+                debug!("[{}] exist url: {}", tries, download_url);
                 let result = request_builder
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
@@ -595,12 +618,19 @@ impl RangeReader {
                         StatusCode::NOT_FOUND => Ok(false),
                         _ => Err(unexpected_status_code(&resp)),
                     });
-                result.tap_err(|err| {
-                    warn!("exist error url: {}, error: {}", download_url, err);
-                })
+                result
+                    .tap_ok(|_| {
+                        info!("[{}] exist ok url: {}", tries, download_url);
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] exist error url: {}, error: {}",
+                            tries, download_url, err
+                        );
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed exist url = {}, error: {:?}",
                     download_url, err,
                 );
@@ -612,8 +642,8 @@ impl RangeReader {
     pub fn file_size(&self) -> IOResult<u64> {
         self.with_retries(
             Method::HEAD,
-            |request_builder, download_url, chosen_host| {
-                debug!("file_size url: {}", download_url);
+            |tries, request_builder, download_url, chosen_host| {
+                debug!("[{}] file_size url: {}", tries, download_url);
                 let result = request_builder
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
@@ -625,16 +655,19 @@ impl RangeReader {
                             Err(unexpected_status_code(&resp))
                         }
                     });
-                match result {
-                    Ok(size) => Ok(size),
-                    Err(err) => {
-                        warn!("file_size error url: {}, error: {}", download_url, err);
-                        Err(err)
-                    }
-                }
+                result
+                    .tap_ok(|_| {
+                        info!("[{}] file_size ok url: {}", tries, download_url);
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] file_size error url: {}, error: {}",
+                            tries, download_url, err
+                        );
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed file_size url = {}, error: {:?}",
                     download_url, err,
                 );
@@ -656,10 +689,10 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
-            |mut request_builder, download_url, chosen_host| {
+            |tries, mut request_builder, download_url, chosen_host| {
                 debug!(
-                    "download_to url: {}, start_from: {}",
-                    download_url, start_from
+                    "[{}] download_to url: {}, start_from: {}",
+                    tries, download_url, start_from
                 );
                 if start_from > 0 {
                     request_builder =
@@ -669,7 +702,7 @@ impl RangeReader {
                     .send()
                     .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .and_then(|mut resp| {
+                    .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                             Ok(0)
                         } else if resp.status() != StatusCode::OK
@@ -677,21 +710,29 @@ impl RangeReader {
                         {
                             Err(unexpected_status_code(&resp))
                         } else {
-                            resp.copy_to(writer)
+                            io_copy(&mut self.wrap_reader(resp, chosen_host), writer)
                                 .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                         }
                     });
                 let origin_start_from = start_from;
                 start_from = writer.seek(SeekFrom::Current(0))?;
-                result.map(|_| start_from - init_start_from).tap_err(|err| {
-                    warn!(
-                        "download error url: {}, start_from: {}, error: {}",
-                        download_url, origin_start_from, err
-                    );
-                })
+                result
+                    .map(|_| start_from - init_start_from)
+                    .tap_ok(|_| {
+                        info!(
+                            "[{}] download ok url: {}, start_from: {}",
+                            tries, download_url, origin_start_from
+                        );
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] download error url: {}, start_from: {}, error: {}",
+                            tries, download_url, origin_start_from, err
+                        );
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed download url = {}, start_from: {}, error: {:?}",
                     download_url, init_start_from, err,
                 );
@@ -707,8 +748,11 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
-            |request_builder, download_url, chosen_host| {
-                debug!("read_last_bytes url: {}, len: {}", download_url, size);
+            |tries, request_builder, download_url, chosen_host| {
+                debug!(
+                    "[{}] read_last_bytes url: {}, len: {}",
+                    tries, download_url, size
+                );
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
@@ -735,16 +779,23 @@ impl RangeReader {
                         let actual_size = io_copy(&mut resp.take(size), &mut cursor)?;
                         Ok((actual_size, total_size))
                     });
-                result.tap_err(|err| {
-                    warn!(
-                        "download error url: {}, len: {}, error: {}",
-                        download_url, size, err
-                    );
-                    cursor.set_position(0);
-                })
+                result
+                    .tap_ok(|_| {
+                        info!(
+                            "[{}] download ok url: {}, len: {}",
+                            tries, download_url, size
+                        );
+                    })
+                    .tap_err(|err| {
+                        warn!(
+                            "[{}] download error url: {}, len: {}, error: {}",
+                            tries, download_url, size, err
+                        );
+                        cursor.set_position(0);
+                    })
             },
             |err, download_url| {
-                warn!(
+                error!(
                     "final failed read_last_bytes url = {}, len: {}, error: {:?}",
                     download_url, size, err,
                 );
@@ -752,10 +803,15 @@ impl RangeReader {
         )
     }
 
+    #[inline]
+    fn wrap_reader<'a, R: 'a + Read>(&'a self, source: R, chosen_host: &'a str) -> impl Read + 'a {
+        self.inner.io_selector.wrap_reader(source, chosen_host)
+    }
+
     fn with_retries<T>(
         &self,
         method: Method,
-        mut for_each_url: impl FnMut(HTTPRequestBuilder, &str, &str) -> IOResult<T>,
+        mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str) -> IOResult<T>,
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
         let now = SystemTime::now();
@@ -782,7 +838,12 @@ impl RangeReader {
                 .request(method.to_owned(), download_url.to_owned())
                 .header(REQUEST_ID_HEADER, get_req_id(now, tries))
                 .timeout(chosen_io_info.timeout);
-            match for_each_url(request_builder, download_url.as_str(), &chosen_io_info.host) {
+            match for_each_url(
+                tries,
+                request_builder,
+                download_url.as_str(),
+                &chosen_io_info.host,
+            ) {
                 Ok(result) => {
                     self.inner.io_selector.reward(&chosen_io_info.host);
                     return Ok(result);
@@ -842,12 +903,10 @@ impl RangeReader {
             }
         }
 
+        #[inline]
         fn sleep_before_retry(tries: usize) {
             if tries >= 3 {
-                let wait = 500 * (tries << 1) as u64;
-                if wait > 0 {
-                    sleep(Duration::from_millis(wait));
-                }
+                sleep(Duration::from_secs(tries as u64));
             }
         }
     }
@@ -1105,7 +1164,6 @@ mod tests {
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .use_getfile_api(false)
                     .normalize_key(true)
-                    .normalize_key(true)
                     .build();
             spawn_blocking(move || {
                 assert!(downloader.exist().unwrap());
@@ -1137,7 +1195,6 @@ mod tests {
                 RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
                     .io_tries(3)
                     .use_getfile_api(false)
-                    .normalize_key(true)
                     .normalize_key(true)
                     .build();
             spawn_blocking(move || {
