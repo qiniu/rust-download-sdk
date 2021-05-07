@@ -202,7 +202,7 @@ fn query_for_domains_without_cache(
     uc_selector: &HostSelector,
     uc_tries: usize,
 ) -> IOResult<CacheValue> {
-    return query_with_retry(uc_selector, uc_tries, |host, timeout| {
+    return query_with_retry(uc_selector, uc_tries, |host, timeout_power, timeout| {
         let url = Url::parse_with_params(
             &format!("{}/v4/query", host),
             &[("ak", ak.as_ref()), ("bucket", bucket.as_ref())],
@@ -217,7 +217,7 @@ fn query_for_domains_without_cache(
             .send()
             .tap_err(|err| {
                 if err.is_timeout() {
-                    uc_selector.increase_timeout_power(host);
+                    uc_selector.increase_timeout_power_by(host, timeout_power);
                 }
             })
             .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
@@ -228,7 +228,8 @@ fn query_for_domains_without_cache(
                         format!("Unexpected status code {}", resp.status().as_u16()),
                     ))
                 } else {
-                    resp.json::<ResponseBody>()
+                    let body = uc_selector.wrap_reader(resp, host, timeout_power);
+                    serde_json::from_reader::<_, ResponseBody>(body)
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                 }
             })
@@ -249,12 +250,12 @@ fn query_for_domains_without_cache(
     fn query_with_retry<T>(
         uc_selector: &HostSelector,
         tries: usize,
-        mut for_each_host: impl FnMut(&str, Duration) -> IOResult<T>,
+        mut for_each_host: impl FnMut(&str, usize, Duration) -> IOResult<T>,
     ) -> IOResult<T> {
         let mut last_error = None;
         for _ in 0..tries {
             let host_info = uc_selector.select_host();
-            match for_each_host(&host_info.host, host_info.timeout) {
+            match for_each_host(&host_info.host, host_info.timeout_power, host_info.timeout) {
                 Ok(response) => {
                     uc_selector.reward(&host_info.host);
                     return Ok(response);

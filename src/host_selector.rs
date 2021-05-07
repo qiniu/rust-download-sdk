@@ -135,14 +135,17 @@ impl HostsUpdater {
     }
 
     #[inline]
-    pub fn increase_timeout_power(&self, host: &str) {
+    pub fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
         if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
-            punished_info.timeout_power += 1;
+            timeout_power = timeout_power.saturating_add(1);
+            if punished_info.timeout_power < timeout_power {
+                punished_info.timeout_power = timeout_power;
+                info!(
+                    "The timeout_power of host {} increases, now is {}",
+                    host, punished_info.timeout_power
+                );
+            }
             punished_info.last_punished_at = SystemTime::now();
-            info!(
-                "The timeout_power of host {} increases, now is {}",
-                host, punished_info.timeout_power
-            );
         }
     }
 }
@@ -322,6 +325,7 @@ impl HostSelectorBuilder {
 
 pub(super) struct HostInfo {
     pub(super) host: String,
+    pub(super) timeout_power: usize,
     pub(super) timeout: Duration,
 }
 
@@ -397,6 +401,7 @@ impl HostSelector {
                 HostInfo {
                     host: h.host.to_owned(),
                     timeout: h.timeout,
+                    timeout_power: h.timeout_power,
                 }
             })
             .unwrap()
@@ -405,9 +410,8 @@ impl HostSelector {
     #[inline]
     pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
-            let timeout_power = punished_info.timeout_power;
-            *punished_info = Default::default();
-            punished_info.timeout_power = timeout_power.saturating_sub(1);
+            punished_info.continuous_punished_times = 0;
+            punished_info.timeout_power = punished_info.timeout_power.saturating_sub(1);
             info!(
                 "Reward host {}, now timeout_power is {}",
                 host, punished_info.timeout_power
@@ -432,8 +436,9 @@ impl HostSelector {
     }
 
     #[inline]
-    pub(super) fn increase_timeout_power(&self, host: &str) {
-        self.hosts_updater.increase_timeout_power(host)
+    pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
+        self.hosts_updater
+            .increase_timeout_power_by(host, timeout_power)
     }
 
     #[inline]
@@ -441,10 +446,12 @@ impl HostSelector {
         &'a self,
         reader: R,
         host: &'a str,
+        timeout_power: usize,
     ) -> ReaderWithTimeoutPower<'a, R> {
         ReaderWithTimeoutPower {
             reader,
             host,
+            timeout_power,
             hosts_updater: &self.hosts_updater,
         }
     }
@@ -454,6 +461,7 @@ pub(super) struct ReaderWithTimeoutPower<'a, R: Read> {
     reader: R,
     hosts_updater: &'a HostsUpdater,
     host: &'a str,
+    timeout_power: usize,
 }
 
 impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
@@ -462,7 +470,8 @@ impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
         match self.reader.read(buf) {
             Ok(have_read) => Ok(have_read),
             Err(err) if err.kind() == IOErrorKind::TimedOut => {
-                self.hosts_updater.increase_timeout_power(self.host);
+                self.hosts_updater
+                    .increase_timeout_power_by(self.host, self.timeout_power);
                 Err(err)
             }
             Err(err) => Err(err),
@@ -596,7 +605,7 @@ mod tests {
             assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
-            host_selector.increase_timeout_power("http://host1");
+            host_selector.increase_timeout_power_by("http://host1", 0);
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 1"));
             {
                 let host_info = host_selector.select_host();
@@ -614,14 +623,14 @@ mod tests {
                 assert_eq!(host_info.host, "http://host2".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.increase_timeout_power("http://host1");
+            host_selector.increase_timeout_power_by("http://host1", 1);
             host_selector.punish("http://host1", &IOError::new(IOErrorKind::Other, "error 3"));
             assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 4"));
             assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
-            host_selector.increase_timeout_power("http://host2");
+            host_selector.increase_timeout_power_by("http://host2", 0);
             host_selector.punish("http://host2", &IOError::new(IOErrorKind::Other, "error 5"));
-            host_selector.increase_timeout_power("http://host3");
+            host_selector.increase_timeout_power_by("http://host3", 0);
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 6"));
             {
                 let host_info = host_selector.select_host();
@@ -654,11 +663,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.increase_timeout_power("http://host3");
+            host_selector.increase_timeout_power_by("http://host3", 2);
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 7"));
-            host_selector.increase_timeout_power("http://host3");
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 8"));
-            host_selector.increase_timeout_power("http://host3");
             host_selector.punish("http://host3", &IOError::new(IOErrorKind::Other, "error 9"));
             {
                 let host_info = host_selector.select_host();
@@ -681,13 +688,11 @@ mod tests {
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
             host_selector.reward("http://host3");
-            {
-                let host_info = host_selector.select_host();
-                assert_eq!(host_info.host, "http://host3".to_owned());
-                assert_eq!(host_info.timeout, Duration::from_millis(100));
-            }
             assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
+            host_selector.reward("http://host3");
+            host_selector.reward("http://host3");
+            host_selector.reward("http://host3");
             assert_eq!(host_selector.select_host().host, "http://host3".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host1".to_owned());
             assert_eq!(host_selector.select_host().host, "http://host2".to_owned());
