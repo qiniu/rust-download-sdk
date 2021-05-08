@@ -52,7 +52,7 @@ impl<'a> Ord for PunishedInfo {
                 .continuous_punished_times
                 .cmp(&other.continuous_punished_times);
         }
-        return self.last_punished_at.cmp(&other.last_punished_at);
+        self.last_punished_at.cmp(&other.last_punished_at)
     }
 }
 
@@ -181,7 +181,7 @@ impl HostsUpdater {
                 }
             }
         }
-        return false;
+        false
     }
 
     #[inline]
@@ -395,10 +395,8 @@ impl HostSelectorBuilder {
                 .map(|f| UpdateOption::new(f, update_interval)),
         );
 
-        if auto_update_enabled {
-            if is_hosts_empty {
-                hosts_updater.update_hosts();
-            }
+        if auto_update_enabled && is_hosts_empty {
+            hosts_updater.update_hosts();
         }
 
         HostSelector {

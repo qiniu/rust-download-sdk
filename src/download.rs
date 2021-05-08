@@ -614,7 +614,7 @@ impl RangeReader {
                 .join(",")
         }
 
-        fn extract_boundary<'s>(content_type: &'s str) -> Option<&'s str> {
+        fn extract_boundary(content_type: &str) -> Option<&str> {
             const BOUNDARY: &str = "boundary=";
             content_type.find(BOUNDARY).map(|idx| {
                 let start = idx + BOUNDARY.len();
@@ -917,14 +917,14 @@ impl RangeReader {
                 io_url.to_owned()
             };
             if normalize_key {
-                if url.ends_with("/") && key.starts_with("/") {
+                if url.ends_with('/') && key.starts_with('/') {
                     url.truncate(url.len() - 1);
-                } else if !url.ends_with("/") && !key.starts_with("/") {
-                    url.push_str("/");
+                } else if !url.ends_with('/') && !key.starts_with('/') {
+                    url.push('/');
                 }
             }
             url.push_str(key);
-            return url;
+            url
         }
 
         fn sign_download_url_if_needed(
