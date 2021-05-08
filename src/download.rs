@@ -379,7 +379,7 @@ impl ReadAt for RangeReader {
 
         self.with_retries(
             Method::GET,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_at url: {}, range: {}",
                     tries, download_url, &range
@@ -388,7 +388,9 @@ impl ReadAt for RangeReader {
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let code = resp.status();
@@ -398,7 +400,7 @@ impl ReadAt for RangeReader {
                         let content_length = parse_content_length(&resp);
                         let max_size = content_length.min(size);
                         io_copy(
-                            &mut self.wrap_reader(resp.take(max_size), chosen_host),
+                            &mut self.wrap_reader(resp.take(max_size), chosen_host, timeout_power),
                             &mut cursor,
                         )
                         .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
@@ -445,7 +447,7 @@ impl RangeReader {
 
         return self.with_retries(
             Method::GET,
-            |tries, http_request_builder, download_url, chosen_host| {
+            |tries, http_request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_multi_ranges url: {}, range: {:?}",
                     tries, download_url, ranges
@@ -453,14 +455,16 @@ impl RangeReader {
                 let result = http_request_builder
                     .header(RANGE, &range_header_value)
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let mut parts = Vec::with_capacity(ranges.len());
                         match resp.status() {
                             StatusCode::OK => {
                                 let mut body = Vec::new();
-                                self.wrap_reader(resp, chosen_host)
+                                self.wrap_reader(resp, chosen_host, timeout_power)
                                     .read_to_end(&mut body)
                                     .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))?;
                                 for &(from, len) in ranges.iter() {
@@ -496,7 +500,8 @@ impl RangeReader {
                                         .to_owned()
                                     };
 
-                                    let mut body = self.wrap_reader(resp, chosen_host);
+                                    let mut body =
+                                        self.wrap_reader(resp, chosen_host, timeout_power);
                                     let mut multipart = Multipart::with_body(&mut body, boundary);
                                     loop {
                                         match multipart.read_entry() {
@@ -560,7 +565,8 @@ impl RangeReader {
                                         })?;
                                     let len = to - from + 1;
                                     let mut data = Vec::with_capacity(len as usize);
-                                    self.wrap_reader(resp, chosen_host).read_to_end(&mut data)?;
+                                    self.wrap_reader(resp, chosen_host, timeout_power)
+                                        .read_to_end(&mut data)?;
                                     parts.push(RangePart {
                                         data,
                                         range: (from, len),
@@ -608,7 +614,7 @@ impl RangeReader {
                 .join(",")
         }
 
-        fn extract_boundary<'s>(content_type: &'s str) -> Option<&'s str> {
+        fn extract_boundary(content_type: &str) -> Option<&str> {
             const BOUNDARY: &str = "boundary=";
             content_type.find(BOUNDARY).map(|idx| {
                 let start = idx + BOUNDARY.len();
@@ -624,11 +630,13 @@ impl RangeReader {
     pub fn exist(&self) -> IOResult<bool> {
         self.with_retries(
             Method::HEAD,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] exist url: {}", tries, download_url);
                 let result = request_builder
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| match resp.status() {
                         StatusCode::OK => Ok(true),
@@ -659,11 +667,13 @@ impl RangeReader {
     pub fn file_size(&self) -> IOResult<u64> {
         self.with_retries(
             Method::HEAD,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] file_size url: {}", tries, download_url);
                 let result = request_builder
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::Other, err))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::OK {
@@ -706,7 +716,7 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
-            |tries, mut request_builder, download_url, chosen_host| {
+            |tries, mut request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] download_to url: {}, start_from: {}",
                     tries, download_url, start_from
@@ -717,7 +727,9 @@ impl RangeReader {
                 }
                 let result = request_builder
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
@@ -727,8 +739,11 @@ impl RangeReader {
                         {
                             Err(unexpected_status_code(&resp))
                         } else {
-                            io_copy(&mut self.wrap_reader(resp, chosen_host), writer)
-                                .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
+                            io_copy(
+                                &mut self.wrap_reader(resp, chosen_host, timeout_power),
+                                writer,
+                            )
+                            .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
                         }
                     });
                 let origin_start_from = start_from;
@@ -765,7 +780,7 @@ impl RangeReader {
 
         self.with_retries(
             Method::GET,
-            |tries, request_builder, download_url, chosen_host| {
+            |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
                     "[{}] read_last_bytes url: {}, len: {}",
                     tries, download_url, size
@@ -773,7 +788,9 @@ impl RangeReader {
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
-                    .tap_err(|err| self.increase_timeout_power_if_needed(chosen_host, err))
+                    .tap_err(|err| {
+                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
+                    })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         if resp.status() != StatusCode::PARTIAL_CONTENT {
@@ -821,14 +838,21 @@ impl RangeReader {
     }
 
     #[inline]
-    fn wrap_reader<'a, R: 'a + Read>(&'a self, source: R, chosen_host: &'a str) -> impl Read + 'a {
-        self.inner.io_selector.wrap_reader(source, chosen_host)
+    fn wrap_reader<'a, R: 'a + Read>(
+        &'a self,
+        source: R,
+        chosen_host: &'a str,
+        timeout_power: usize,
+    ) -> impl Read + 'a {
+        self.inner
+            .io_selector
+            .wrap_reader(source, chosen_host, timeout_power)
     }
 
     fn with_retries<T>(
         &self,
         method: Method,
-        mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str) -> IOResult<T>,
+        mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str, usize) -> IOResult<T>,
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
         let now = SystemTime::now();
@@ -862,6 +886,7 @@ impl RangeReader {
                 request_builder,
                 download_url.as_str(),
                 &chosen_io_info.host,
+                chosen_io_info.timeout_power,
             ) {
                 Ok(result) => {
                     self.inner.io_selector.reward(&chosen_io_info.host);
@@ -892,14 +917,14 @@ impl RangeReader {
                 io_url.to_owned()
             };
             if normalize_key {
-                if url.ends_with("/") && key.starts_with("/") {
+                if url.ends_with('/') && key.starts_with('/') {
                     url.truncate(url.len() - 1);
-                } else if !url.ends_with("/") && !key.starts_with("/") {
-                    url.push_str("/");
+                } else if !url.ends_with('/') && !key.starts_with('/') {
+                    url.push('/');
                 }
             }
             url.push_str(key);
-            return url;
+            url
         }
 
         fn sign_download_url_if_needed(
@@ -931,9 +956,16 @@ impl RangeReader {
     }
 
     #[inline]
-    fn increase_timeout_power_if_needed(&self, host: &str, err: &ReqwestError) {
+    fn increase_timeout_power_if_needed(
+        &self,
+        host: &str,
+        timeout_power: usize,
+        err: &ReqwestError,
+    ) {
         if err.is_timeout() {
-            self.inner.io_selector.increase_timeout_power(host)
+            self.inner
+                .io_selector
+                .increase_timeout_power_by(host, timeout_power)
         }
     }
 }

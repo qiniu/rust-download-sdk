@@ -176,7 +176,9 @@ fn load_config() -> Option<Config> {
     }
 }
 
-static CONFIG_UPDATE_HANDLERS: Lazy<RwLock<Vec<fn()>>> = Lazy::new(|| RwLock::new(Vec::new()));
+type ConfigUpdateHandler = fn();
+type ConfigUpdateHandlers = Vec<ConfigUpdateHandler>;
+static CONFIG_UPDATE_HANDLERS: Lazy<RwLock<ConfigUpdateHandlers>> = Lazy::new(Default::default);
 
 pub(super) fn on_config_updated(handle: fn()) {
     CONFIG_UPDATE_HANDLERS.write().unwrap().push(handle);
