@@ -441,7 +441,7 @@ pub struct RangePart {
 impl RangeReader {
     /// 读取文件的多个区域，返回每个区域对应的数据
     /// # Arguments
-    /// * `range` - 区域列表，每个区域有开始和结束两个偏移量组成（包含开始偏移量，不包含结束偏移量），
+    /// * `range` - 区域列表，每个区域有开始偏移量和区域长度组成
     pub fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(ranges));
 

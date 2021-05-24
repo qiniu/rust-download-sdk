@@ -37,5 +37,5 @@ warp = "0.2.5"
 tokio = { version = "0.2.22", features = ["rt-core", "blocking", "macros"] }
 structopt = "0.3.18"
 anyhow = "1.0.32"
-env_logger = "0.8.2"
+env_logger = "0.8.3"
 tempfile = "3.2.0"
