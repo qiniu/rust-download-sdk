@@ -280,7 +280,7 @@ impl HostPunisher {
         min(
             // 超时时长有上限，否则可能超过 tokio 极限
             self.base_timeout * (1 << punished_info.timeout_power),
-            Duration::from_secs(300),
+            Duration::from_secs(600),
         )
     }
 

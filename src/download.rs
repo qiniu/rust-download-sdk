@@ -15,7 +15,7 @@ use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use reqwest::{
     blocking::{RequestBuilder as HTTPRequestBuilder, Response as HTTPResponse},
-    header::{CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+    header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     Error as ReqwestError, Method, StatusCode,
 };
 use std::{
@@ -26,7 +26,7 @@ use std::{
     result::Result,
     sync::{Arc, RwLock},
     thread::sleep,
-    time::{Duration, SystemTime, SystemTimeError, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
@@ -376,6 +376,7 @@ impl ReadAt for RangeReader {
         }
         let mut cursor = Cursor::new(buf);
         let range = format!("bytes={}-{}", pos, pos + size - 1);
+        let begin_at = Instant::now();
 
         self.with_retries(
             Method::GET,
@@ -384,10 +385,13 @@ impl ReadAt for RangeReader {
                     "[{}] read_at url: {}, range: {}",
                     tries, download_url, &range
                 );
+                let mut req_id = None;
+                let begin_at = Instant::now();
 
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
@@ -410,22 +414,26 @@ impl ReadAt for RangeReader {
                     .map(|size| size as usize)
                     .tap_ok(|_| {
                         info!(
-                            "[{}] read_at ok url: {}, range: {}",
-                            tries, download_url, range
+                            "[{}] read_at ok url: {}, range: {}, req_id: {:?}, elapsed: {:?}",
+                            tries,
+                            download_url,
+                            range,
+                            req_id,
+                            begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] read_at error url: {}, range: {}, error: {}",
-                            tries, download_url, range, err
+                            "[{}] read_at error url: {}, range: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, range, err, req_id, begin_at.elapsed(),
                         );
                         cursor.set_position(0);
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed read_at url = {}, error: {:?}",
-                    download_url, err,
+                    "final failed read_at url = {}, error: {:?}, elapsed: {:?}",
+                    download_url, err, begin_at.elapsed(),
                 );
             },
         )
@@ -444,6 +452,7 @@ impl RangeReader {
     /// * `range` - 区域列表，每个区域有开始偏移量和区域长度组成
     pub fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(ranges));
+        let begin_at = Instant::now();
 
         return self.with_retries(
             Method::GET,
@@ -452,9 +461,12 @@ impl RangeReader {
                     "[{}] read_multi_ranges url: {}, range: {:?}",
                     tries, download_url, ranges
                 );
+                let mut req_id = None;
+                let begin_at = Instant::now();
                 let result = http_request_builder
                     .header(RANGE, &range_header_value)
                     .send()
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
@@ -583,21 +595,21 @@ impl RangeReader {
                 result
                     .tap_ok(|_| {
                         info!(
-                            "[{}] read_multi_ranges ok url: {}, range: {:?}",
-                            tries, download_url, ranges
+                            "[{}] read_multi_ranges ok url: {}, range: {:?}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, ranges, req_id, begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] read_multi_ranges error url: {}, range: {:?}, error: {}",
-                            tries, download_url, ranges, err
+                            "[{}] read_multi_ranges error url: {}, range: {:?}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, ranges, err, req_id, begin_at.elapsed(),
                         );
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed read_multi_ranges url = {}, error: {:?}",
-                    download_url, err,
+                    "final failed read_multi_ranges url = {}, error: {:?}, elapsed: {:?}",
+                    download_url, err, begin_at.elapsed(),
                 );
             },
         );
@@ -628,12 +640,16 @@ impl RangeReader {
 
     /// 判定当前对象是否存在
     pub fn exist(&self) -> IOResult<bool> {
+        let begin_at = Instant::now();
         self.with_retries(
             Method::HEAD,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] exist url: {}", tries, download_url);
+                let mut req_id = None;
+                let begin_at = Instant::now();
                 let result = request_builder
                     .send()
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
@@ -645,19 +661,31 @@ impl RangeReader {
                     });
                 result
                     .tap_ok(|_| {
-                        info!("[{}] exist ok url: {}", tries, download_url);
+                        info!(
+                            "[{}] exist ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            tries,
+                            download_url,
+                            req_id,
+                            begin_at.elapsed(),
+                        );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] exist error url: {}, error: {}",
-                            tries, download_url, err
+                            "[{}] exist error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries,
+                            download_url,
+                            err,
+                            req_id,
+                            begin_at.elapsed(),
                         );
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed exist url = {}, error: {:?}",
-                    download_url, err,
+                    "final failed exist url = {}, error: {:?}, elapsed: {:?}",
+                    download_url,
+                    err,
+                    begin_at.elapsed(),
                 );
             },
         )
@@ -665,16 +693,20 @@ impl RangeReader {
 
     /// 获取当前对象的文件大小
     pub fn file_size(&self) -> IOResult<u64> {
+        let begin_at = Instant::now();
         self.with_retries(
             Method::HEAD,
             |tries, request_builder, download_url, chosen_host, timeout_power| {
                 debug!("[{}] file_size url: {}", tries, download_url);
+                let mut req_id = None;
+                let begin_at = Instant::now();
                 let result = request_builder
                     .send()
                     .tap_err(|err| {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
                     .map_err(|err| IOError::new(IOErrorKind::Other, err))
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::OK {
                             Ok(parse_content_length(&resp))
@@ -684,19 +716,31 @@ impl RangeReader {
                     });
                 result
                     .tap_ok(|_| {
-                        info!("[{}] file_size ok url: {}", tries, download_url);
+                        info!(
+                            "[{}] file_size ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            tries,
+                            download_url,
+                            req_id,
+                            begin_at.elapsed(),
+                        );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] file_size error url: {}, error: {}",
-                            tries, download_url, err
+                            "[{}] file_size error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries,
+                            download_url,
+                            err,
+                            req_id,
+                            begin_at.elapsed(),
                         );
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed file_size url = {}, error: {:?}",
-                    download_url, err,
+                    "final failed file_size url = {}, error: {:?}, elapsed: {:?}",
+                    download_url,
+                    err,
+                    begin_at.elapsed(),
                 );
             },
         )
@@ -713,6 +757,7 @@ impl RangeReader {
     pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let init_start_from = writer.seek(SeekFrom::End(0))?;
         let mut start_from = init_start_from;
+        let begin_at = Instant::now();
 
         self.with_retries(
             Method::GET,
@@ -721,6 +766,8 @@ impl RangeReader {
                     "[{}] download_to url: {}, start_from: {}",
                     tries, download_url, start_from
                 );
+                let mut req_id = None;
+                let begin_at = Instant::now();
                 if start_from > 0 {
                     request_builder =
                         request_builder.header(RANGE, format!("bytes={}-", start_from));
@@ -731,6 +778,7 @@ impl RangeReader {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                             Ok(0)
@@ -752,21 +800,21 @@ impl RangeReader {
                     .map(|_| start_from - init_start_from)
                     .tap_ok(|_| {
                         info!(
-                            "[{}] download ok url: {}, start_from: {}",
-                            tries, download_url, origin_start_from
+                            "[{}] download ok url: {}, start_from: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, origin_start_from, req_id, begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] download error url: {}, start_from: {}, error: {}",
-                            tries, download_url, origin_start_from, err
+                            "[{}] download error url: {}, start_from: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, origin_start_from, err, req_id, begin_at.elapsed(),
                         );
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed download url = {}, start_from: {}, error: {:?}",
-                    download_url, init_start_from, err,
+                    "final failed download url = {}, start_from: {}, error: {:?}, elapsed: {:?}",
+                    download_url, init_start_from, err, begin_at.elapsed(),
                 );
             },
         )
@@ -777,6 +825,7 @@ impl RangeReader {
         let size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let range = format!("bytes=-{}", size);
+        let begin_at = Instant::now();
 
         self.with_retries(
             Method::GET,
@@ -785,6 +834,8 @@ impl RangeReader {
                     "[{}] read_last_bytes url: {}, len: {}",
                     tries, download_url, size
                 );
+                let mut req_id = None;
+                let begin_at = Instant::now();
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
@@ -792,6 +843,7 @@ impl RangeReader {
                         self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
                     })
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
+                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() != StatusCode::PARTIAL_CONTENT {
                             return Err(unexpected_status_code(&resp));
@@ -816,22 +868,22 @@ impl RangeReader {
                 result
                     .tap_ok(|_| {
                         info!(
-                            "[{}] download ok url: {}, len: {}",
-                            tries, download_url, size
+                            "[{}] download ok url: {}, len: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, size, req_id, begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] download error url: {}, len: {}, error: {}",
-                            tries, download_url, size, err
+                            "[{}] download error url: {}, len: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, size, err, req_id, begin_at.elapsed(),
                         );
                         cursor.set_position(0);
                     })
             },
             |err, download_url| {
                 error!(
-                    "final failed read_last_bytes url = {}, len: {}, error: {:?}",
-                    download_url, size, err,
+                    "final failed read_last_bytes url = {}, len: {}, error: {:?}, elapsed: {:?}",
+                    download_url, size, err, begin_at.elapsed(),
                 );
             },
         )
@@ -1000,6 +1052,12 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
     let total_size: u64;
     try_scan_text!(range.bytes() => "bytes {}-{}/{}", from, to, total_size);
     Ok((from, to, total_size))
+}
+
+const X_REQ_ID: &str = "x-reqid";
+
+fn extract_request_id(resp: &HTTPResponse) -> Option<HeaderValue> {
+    resp.headers().get(X_REQ_ID).cloned()
 }
 
 #[cfg(test)]
