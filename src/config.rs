@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     convert::TryInto,
     env, fs,
+    io::Result as IOResult,
     path::{Path, PathBuf},
     sync::{mpsc::channel, RwLock},
     thread::{Builder as ThreadBuilder, JoinHandle},
@@ -108,7 +109,7 @@ fn load_config() -> Option<Config> {
                 serde_json::from_slice(&qiniu_config).ok()
             };
             if let Some(qiniu_config) = qiniu_config {
-                setup_config_watcher(&qiniu_config_path);
+                setup_config_watcher(&qiniu_config_path).ok();
                 return Some(qiniu_config);
             } else {
                 error!(
@@ -126,8 +127,12 @@ fn load_config() -> Option<Config> {
         return None;
     }
 
-    fn setup_config_watcher(config_path: impl Into<PathBuf>) {
-        let config_path = config_path.into();
+    fn setup_config_watcher(config_path: impl Into<PathBuf>) -> IOResult<()> {
+        let config_path = config_path
+            .into()
+            .canonicalize()
+            .tap_err(|err| warn!("Failed to canonicalize config path: {:?}", err))?;
+
         static UNIQUE_THREAD: OnceCell<JoinHandle<()>> = OnceCell::new();
 
         if let Err(err) = UNIQUE_THREAD.get_or_try_init(|| {
@@ -145,21 +150,26 @@ fn load_config() -> Option<Config> {
             );
         }
 
+        return Ok(());
+
         fn setup_config_watcher_inner(config_path: &Path) -> NotifyResult<()> {
             let (tx, rx) = channel();
             let mut watcher = watcher(tx, Duration::from_millis(500))?;
-            watcher.watch(config_path, RecursiveMode::NonRecursive)?;
+            watcher.watch(
+                config_path.parent().unwrap_or_else(|| Path::new("/")),
+                RecursiveMode::NonRecursive,
+            )?;
 
             info!("Qiniu config file watcher was setup");
 
             loop {
                 match rx.recv() {
                     Ok(event) => match event {
-                        DebouncedEvent::Create(_) | DebouncedEvent::Write(_) => {
-                            info!("Received event {:?} from Qiniu config file watcher", event);
-                            for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
-                                handle();
-                            }
+                        DebouncedEvent::Create(ref path) if path == config_path => {
+                            event_received(event);
+                        }
+                        DebouncedEvent::Write(ref path) if path == config_path => {
+                            event_received(event);
                         }
                         DebouncedEvent::Error(err, _) => {
                             error!(
@@ -176,6 +186,13 @@ fn load_config() -> Option<Config> {
                         );
                     }
                 }
+            }
+        }
+
+        fn event_received(event: DebouncedEvent) {
+            info!("Received event {:?} from Qiniu config file watcher", event);
+            for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
+                handle();
             }
         }
     }
@@ -407,7 +424,7 @@ mod tests {
     use super::*;
     use std::{
         error::Error,
-        fs::{remove_file, OpenOptions},
+        fs::{remove_file, rename, OpenOptions},
         io::Write,
         sync::atomic::{AtomicUsize, Ordering::Relaxed},
         thread::sleep,
@@ -477,7 +494,61 @@ mod tests {
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 3);
 
-        remove_file(tempfile_path)?;
+        config.access_key = "test-ak-3".into();
+        config.secret_key = "test-sk-3".into();
+        config.bucket = "test-bucket-3".into();
+
+        {
+            remove_file(&tempfile_path)?;
+            let mut tempfile = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&tempfile_path)?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+        }
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 6);
+
+        {
+            let new_tempfile_path = {
+                let mut new_path = tempfile_path.to_owned().into_os_string();
+                new_path.push(".tmp");
+                new_path
+            };
+            let mut tempfile = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&new_tempfile_path)?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            rename(&new_tempfile_path, &tempfile_path)?;
+        }
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 9);
+
+        {
+            let new_tempfile_path = {
+                let mut new_path = tempfile_path.to_owned().into_os_string();
+                new_path.push(".tmp");
+                new_path
+            };
+            let mut tempfile = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .open(&new_tempfile_path)?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            remove_file(&tempfile_path)?;
+            rename(&new_tempfile_path, &tempfile_path)?;
+        }
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 12);
+
+        remove_file(&tempfile_path)?;
 
         Ok(())
     }
