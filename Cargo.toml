@@ -11,34 +11,33 @@ keywords = ["qiniu", "storage", "sdk", "cloud"]
 license = "MIT"
 
 [dependencies]
-base64 = "0.10.1"
-sha-1 = "0.8.1"
-url = "2.1.0"
-hmac = "0.7.1"
-crypto-mac = "0.7.0"
-reqwest = { version = "0.10.8", features = ["blocking", "json"] }
-once_cell = "1.4.1"
+base64 = "0.13.0"
+sha-1 = "0.9.6"
+url = "2.2.2"
+hmac = "0.11.0"
+reqwest = { version = "0.11.3", features = ["blocking", "json"] }
+once_cell = "1.7.2"
 positioned-io = "0.2.2"
 rand = "0.8.3"
-multipart = { version = "=0.17.3", package = "qiniu-multipart" }
+multipart = { version = "=0.17.3", package = "qiniu-multipart", default-features = false, features = ["client", "server"] }
 text_io = "0.1.8"
 dashmap = { version = "4.0.2", features = ["serde"] }
-serde = { version = "1.0.117", features = ["derive"] }
-serde_json = "1.0.59"
-directories = "3.0.1"
+serde = { version = "1.0.126", features = ["derive"] }
+serde_json = "1.0.64"
+directories = "3.0.2"
 log = "0.4.14"
 toml = "0.5.8"
 tap = "1.0.1"
-notify = "4.0.16"
+notify = "4.0.17"
 fd-lock = "2.0.0"
-anyhow = "1.0.32"
+anyhow = "1.0.40"
+hyper = { version = "0.14.9", default-features = false, features = ["tcp", "http1", "http2", "client", "runtime"] }
+tokio = { version = "1.6.1", default-features = false, features = ["net", "time"] }
 
 [dev-dependencies]
-futures = "0.3.5"
-warp = "0.2.5"
-tokio = { version = "0.2.22", features = ["rt-core", "blocking", "macros", "time"] }
-structopt = "0.3.18"
-anyhow = "1.0.32"
+futures = "0.3.15"
+warp = { version = "0.3.1", default-features = false, features = ["multipart"] }
+tokio = { version = "1.6.1", features = ["macros", "time"] }
 env_logger = "0.8.3"
 tempfile = "3.2.0"
-rayon = "1.5.0"
+rayon = "1.5.1"

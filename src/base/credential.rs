@@ -1,5 +1,4 @@
-use crypto_mac::Mac;
-use hmac::Hmac;
+use hmac::{Hmac, Mac, NewMac};
 use sha1::Sha1;
 
 use super::base64;
@@ -39,9 +38,9 @@ impl Credential {
     }
 
     fn base64_hmac_digest(&self, data: &[u8]) -> String {
-        let mut hmac = Hmac::<Sha1>::new_varkey(self.secret_key.as_bytes()).unwrap();
-        hmac.input(data);
-        base64::urlsafe(&hmac.result().code())
+        let mut hmac = Hmac::<Sha1>::new_from_slice(self.secret_key.as_bytes()).unwrap();
+        hmac.update(data);
+        base64::urlsafe(&hmac.finalize().into_bytes())
     }
 }
 
