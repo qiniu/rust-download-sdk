@@ -626,7 +626,7 @@ mod tests {
         sync::Mutex,
         thread::sleep,
     };
-    use tokio::{spawn, sync::oneshot::channel, task::spawn_blocking, time::delay_for};
+    use tokio::{spawn, sync::oneshot::channel, task::spawn_blocking, time::sleep as delay_for};
     use warp::{hyper::Body, path, reply::Response, Filter};
 
     #[test]

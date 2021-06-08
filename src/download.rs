@@ -1175,7 +1175,7 @@ mod tests {
     };
     use tokio::{
         task::{spawn, spawn_blocking},
-        time::delay_for,
+        time::sleep as delay_for,
     };
     use warp::{
         header,
