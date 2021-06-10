@@ -446,9 +446,7 @@ impl ReadAt for RangeReader {
                     .header(RANGE, &range)
                     .send()
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let code = resp.status();
@@ -513,8 +511,8 @@ impl RangeReader {
             ApiName::RangeReaderReadMultiRanges,
             |tries, http_request_builder, download_url, chosen_host, timeout_power| {
                 debug!(
-                    "[{}] read_multi_ranges url: {}, range: {:?}",
-                    tries, download_url, ranges
+                    "[{}] read_multi_ranges url: {}",
+                    tries, download_url,
                 );
                 let mut req_id = None;
                 let begin_at = Instant::now();
@@ -522,9 +520,7 @@ impl RangeReader {
                     .header(RANGE, &range_header_value)
                     .send()
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
                         let mut parts = Vec::with_capacity(ranges.len());
@@ -650,14 +646,14 @@ impl RangeReader {
                 result
                     .tap_ok(|_| {
                         info!(
-                            "[{}] read_multi_ranges ok url: {}, range: {:?}, req_id: {:?}, elapsed: {:?}",
-                            tries, download_url, ranges, req_id, begin_at.elapsed(),
+                            "[{}] read_multi_ranges ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, req_id, begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] read_multi_ranges error url: {}, range: {:?}, error: {}, req_id: {:?}, elapsed: {:?}",
-                            tries, download_url, ranges, err, req_id, begin_at.elapsed(),
+                            "[{}] read_multi_ranges error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            tries, download_url, err, req_id, begin_at.elapsed(),
                         );
                     })
             },
@@ -706,9 +702,7 @@ impl RangeReader {
                 let result = request_builder
                     .send()
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| match resp.status() {
                         StatusCode::OK => Ok(true),
@@ -759,9 +753,7 @@ impl RangeReader {
                 let begin_at = Instant::now();
                 let result = request_builder
                     .send()
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::Other, err))
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
@@ -832,9 +824,7 @@ impl RangeReader {
                 }
                 let result = request_builder
                     .send()
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
@@ -898,9 +888,7 @@ impl RangeReader {
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
-                    .tap_err(|err| {
-                        self.increase_timeout_power_if_needed(chosen_host, timeout_power, err)
-                    })
+                    .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
@@ -1100,16 +1088,13 @@ impl RangeReader {
     }
 
     #[inline]
-    fn increase_timeout_power_if_needed(
-        &self,
-        host: &str,
-        timeout_power: usize,
-        err: &ReqwestError,
-    ) {
+    fn punish_if_needed(&self, host: &str, timeout_power: usize, err: &ReqwestError) {
         if err.is_timeout() {
             self.inner
                 .io_selector
                 .increase_timeout_power_by(host, timeout_power)
+        } else if err.is_connect() {
+            self.inner.io_selector.mark_connection_as_failed(host)
         }
     }
 }

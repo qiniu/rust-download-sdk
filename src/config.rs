@@ -74,7 +74,7 @@ pub fn is_qiniu_enabled() -> bool {
 
 fn build_http_client() -> HTTPClient {
     let mut base_timeout_ms = 3000u64;
-    let mut dial_timeout_ms = 500u64;
+    let mut dial_timeout_ms = 50u64;
     if let Some(config) = QINIU_CONFIG.read().unwrap().as_ref() {
         if let Some(value) = config.base_timeout_ms {
             if value > 0 {
@@ -396,7 +396,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置域名连接的超时时长，默认为 500 毫秒
+    /// 配置域名连接的超时时长，默认为 50 毫秒
     #[inline]
     pub fn connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
         self.inner.dial_timeout_ms =

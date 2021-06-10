@@ -42,10 +42,14 @@ struct PunishedInfo {
     last_punished_at: OptionalInstantTime,
     continuous_punished_times: usize,
     timeout_power: usize,
+    failed_to_connect: bool,
 }
 
 impl<'a> Ord for PunishedInfo {
     fn cmp(&self, other: &Self) -> Ordering {
+        if self.failed_to_connect != other.failed_to_connect {
+            return self.failed_to_connect.cmp(&other.failed_to_connect);
+        }
         if self.timeout_power != other.timeout_power {
             return self.timeout_power.cmp(&other.timeout_power);
         }
@@ -117,7 +121,8 @@ impl<'a> Candidate<'a> {
 
     #[inline]
     fn is_available(&self) -> bool {
-        self.punished_info.continuous_punished_times <= self.max_punished_times
+        !self.punished_info.failed_to_connect
+            && self.punished_info.continuous_punished_times <= self.max_punished_times
     }
 }
 
@@ -224,7 +229,7 @@ impl HostsUpdater {
     }
 
     #[inline]
-    pub fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
+    pub(super) fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
         if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
             timeout_power = timeout_power.saturating_add(1);
             if punished_info.timeout_power < timeout_power {
@@ -234,6 +239,14 @@ impl HostsUpdater {
                     host, punished_info.timeout_power
                 );
             }
+            punished_info.last_punished_at = OptionalInstantTime::now();
+        }
+    }
+
+    #[inline]
+    pub(super) fn mark_connection_as_failed(&self, host: &str) {
+        if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
+            punished_info.failed_to_connect = true;
             punished_info.last_punished_at = OptionalInstantTime::now();
         }
     }
@@ -264,7 +277,8 @@ impl HostPunisher {
 
     #[inline]
     fn is_available(&self, punished_info: &PunishedInfo) -> bool {
-        punished_info.continuous_punished_times <= self.max_punished_times
+        !punished_info.failed_to_connect
+            && punished_info.continuous_punished_times <= self.max_punished_times
     }
 
     #[inline]
@@ -511,6 +525,7 @@ impl HostSelector {
     pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
             punished_info.continuous_punished_times = 0;
+            punished_info.failed_to_connect = false;
             punished_info.timeout_power = punished_info.timeout_power.saturating_sub(1);
             info!(
                 "Reward host {}, now timeout_power is {}",
@@ -554,6 +569,11 @@ impl HostSelector {
     pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
         self.hosts_updater
             .increase_timeout_power_by(host, timeout_power)
+    }
+
+    #[inline]
+    pub(super) fn mark_connection_as_failed(&self, host: &str) {
+        self.hosts_updater.mark_connection_as_failed(host)
     }
 
     #[inline]
@@ -946,6 +966,28 @@ mod tests {
                 let host_info = host_selector.select_host();
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(800));
+            }
+            host_selector.mark_connection_as_failed("http://host2");
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(800));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host1".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(1600));
+            }
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host3".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(800));
+            }
+            host_selector.reward("http://host2");
+            {
+                let host_info = host_selector.select_host();
+                assert_eq!(host_info.host, "http://host2".to_owned());
+                assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
         }
         assert_eq!(
