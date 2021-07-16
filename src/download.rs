@@ -434,18 +434,16 @@ impl ReadAt for RangeReader {
         self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadAt,
-            |tries, request_builder, download_url, chosen_host, timeout_power| {
+            |tries, request_builder, req_id, download_url, chosen_host, timeout_power| {
                 debug!(
-                    "[{}] read_at url: {}, range: {}",
-                    tries, download_url, &range
+                    "[{}] read_at url: {}, req_id: {:?}, range: {}",
+                    tries, download_url, req_id, &range
                 );
-                let mut req_id = None;
                 let begin_at = Instant::now();
 
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
@@ -509,17 +507,15 @@ impl RangeReader {
         return self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadMultiRanges,
-            |tries, http_request_builder, download_url, chosen_host, timeout_power| {
+            |tries, http_request_builder, req_id, download_url, chosen_host, timeout_power| {
                 debug!(
-                    "[{}] read_multi_ranges url: {}",
-                    tries, download_url,
+                    "[{}] read_multi_ranges url: {}, req_id: {:?}",
+                    tries, download_url, req_id,
                 );
-                let mut req_id = None;
                 let begin_at = Instant::now();
                 let result = http_request_builder
                     .header(RANGE, &range_header_value)
                     .send()
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| {
@@ -695,13 +691,14 @@ impl RangeReader {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderExist,
-            |tries, request_builder, download_url, chosen_host, timeout_power| {
-                debug!("[{}] exist url: {}", tries, download_url);
-                let mut req_id = None;
+            |tries, request_builder, req_id, download_url, chosen_host, timeout_power| {
+                debug!(
+                    "[{}] exist url: {}, req_id: {:?}",
+                    tries, download_url, req_id
+                );
                 let begin_at = Instant::now();
                 let result = request_builder
                     .send()
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
                     .and_then(|resp| match resp.status() {
@@ -747,15 +744,16 @@ impl RangeReader {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderFileSize,
-            |tries, request_builder, download_url, chosen_host, timeout_power| {
-                debug!("[{}] file_size url: {}", tries, download_url);
-                let mut req_id = None;
+            |tries, request_builder, req_id, download_url, chosen_host, timeout_power| {
+                debug!(
+                    "[{}] file_size url: {}, req_id: {:?}",
+                    tries, download_url, req_id
+                );
                 let begin_at = Instant::now();
                 let result = request_builder
                     .send()
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::Other, err))
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::OK {
                             Ok(parse_content_length(&resp))
@@ -811,12 +809,11 @@ impl RangeReader {
         self.with_retries(
             Method::GET,
             ApiName::RangeReaderDownloadTo,
-            |tries, mut request_builder, download_url, chosen_host, timeout_power| {
+            |tries, mut request_builder, req_id, download_url, chosen_host, timeout_power| {
                 debug!(
-                    "[{}] download_to url: {}, start_from: {}",
-                    tries, download_url, start_from
+                    "[{}] download_to url: {}, req_id: {:?}, start_from: {}",
+                    tries, download_url, req_id, start_from
                 );
-                let mut req_id = None;
                 let begin_at = Instant::now();
                 if start_from > 0 {
                     request_builder =
@@ -826,7 +823,6 @@ impl RangeReader {
                     .send()
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
                             Ok(0)
@@ -878,19 +874,17 @@ impl RangeReader {
         self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadLastBytes,
-            |tries, request_builder, download_url, chosen_host, timeout_power| {
+            |tries, request_builder, req_id, download_url, chosen_host, timeout_power| {
                 debug!(
-                    "[{}] read_last_bytes url: {}, len: {}",
-                    tries, download_url, size
+                    "[{}] read_last_bytes url: {}, req_id: {:?}, len: {}",
+                    tries, download_url, req_id, size
                 );
-                let mut req_id = None;
                 let begin_at = Instant::now();
                 let result = request_builder
                     .header(RANGE, &range)
                     .send()
                     .tap_err(|err| self.punish_if_needed(chosen_host, timeout_power, err))
                     .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
-                    .tap_ok(|resp| req_id = extract_request_id(&resp))
                     .and_then(|resp| {
                         if resp.status() != StatusCode::PARTIAL_CONTENT {
                             return Err(unexpected_status_code(&resp));
@@ -952,7 +946,14 @@ impl RangeReader {
         &self,
         method: Method,
         api_name: ApiName,
-        mut for_each_url: impl FnMut(usize, HTTPRequestBuilder, &str, &str, usize) -> IOResult<T>,
+        mut for_each_url: impl FnMut(
+            usize,
+            HTTPRequestBuilder,
+            &HeaderValue,
+            &str,
+            &str,
+            usize,
+        ) -> IOResult<T>,
         final_error: impl FnOnce(&IOError, &str),
     ) -> IOResult<T> {
         let begin_at = SystemTime::now();
@@ -976,16 +977,18 @@ impl RangeReader {
                 self.inner.private_url_lifetime,
                 &self.inner.credential,
             );
+            let req_id = get_req_id(begin_at, tries);
             let request_begin_at_instant = Instant::now();
             let request_builder = HTTP_CLIENT
                 .read()
                 .unwrap()
                 .request(method.to_owned(), download_url.to_owned())
-                .header(REQUEST_ID_HEADER, get_req_id(begin_at, tries))
+                .header(REQUEST_ID_HEADER, req_id.to_owned())
                 .timeout(chosen_io_info.timeout);
             match for_each_url(
                 tries,
                 request_builder,
+                &req_id,
                 download_url.as_str(),
                 &chosen_io_info.host,
                 chosen_io_info.timeout_power,
@@ -1131,12 +1134,6 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
     Ok((from, to, total_size))
 }
 
-const X_REQ_ID: &str = "x-reqid";
-
-fn extract_request_id(resp: &HTTPResponse) -> Option<HeaderValue> {
-    resp.headers().get(X_REQ_ID).cloned()
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -1228,18 +1225,20 @@ mod tests {
         clear_cache()?;
 
         let io_routes = {
-            let action_1 = path!("file")
-                .and(header::value("Range"))
-                .map(|range: HeaderValue| {
-                    assert_eq!(range.to_str().unwrap(), "bytes=5-10");
-                    Response::new("1234567890".into())
-                });
-            let action_2 = path!("file2")
-                .and(header::value("Range"))
-                .map(|range: HeaderValue| {
-                    assert_eq!(range.to_str().unwrap(), "bytes=5-16");
-                    Response::new("1234567890".into())
-                });
+            let action_1 =
+                path!("file")
+                    .and(header::value(RANGE.as_str()))
+                    .map(|range: HeaderValue| {
+                        assert_eq!(range.to_str().unwrap(), "bytes=5-10");
+                        Response::new("1234567890".into())
+                    });
+            let action_2 =
+                path!("file2")
+                    .and(header::value(RANGE.as_str()))
+                    .map(|range: HeaderValue| {
+                        assert_eq!(range.to_str().unwrap(), "bytes=5-16");
+                        Response::new("1234567890".into())
+                    });
             action_1.or(action_2)
         };
 
@@ -1306,7 +1305,7 @@ mod tests {
         let io_routes = {
             let io_called = io_called.to_owned();
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=1-5");
                     io_called.fetch_add(1, Relaxed);
@@ -1361,7 +1360,7 @@ mod tests {
         let io_routes = {
             let io_called = io_called.to_owned();
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=1-5");
                     io_called.fetch_add(1, Relaxed);
@@ -1411,18 +1410,19 @@ mod tests {
         env_logger::try_init().ok();
         clear_cache()?;
 
-        let io_routes = path!("file")
-            .and(header::value("Range"))
-            .map(|range: HeaderValue| {
-                assert_eq!(range.to_str().unwrap(), "bytes=-10");
-                let mut resp = Response::new("1234567890".into());
-                *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
-                resp.headers_mut().insert(
-                    CONTENT_RANGE,
-                    "bytes 157286390-157286399/157286400".parse().unwrap(),
-                );
-                resp
-            });
+        let io_routes =
+            path!("file")
+                .and(header::value(RANGE.as_str()))
+                .map(|range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=-10");
+                    let mut resp = Response::new("1234567890".into());
+                    *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+                    resp.headers_mut().insert(
+                        CONTENT_RANGE,
+                        "bytes 157286390-157286399/157286400".parse().unwrap(),
+                    );
+                    resp
+                });
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let io_urls = vec![format!("http://{}", io_addr)];
             {
@@ -1674,7 +1674,7 @@ mod tests {
 
         let routes = {
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     let mut response_body = Multipart::new();
@@ -1734,7 +1734,7 @@ mod tests {
 
         let routes = {
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     "12345678901357924680"
@@ -1770,7 +1770,7 @@ mod tests {
         let routes = {
             let counter = counter.to_owned();
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     counter.fetch_add(1, Relaxed);
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
@@ -1819,7 +1819,7 @@ mod tests {
 
         let routes = {
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
                     let mut response_body = Multipart::new();
@@ -1879,7 +1879,7 @@ mod tests {
 
         let routes = {
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-5");
                     "1234"
@@ -1910,7 +1910,7 @@ mod tests {
 
         let routes = {
             path!("file")
-                .and(header::value("Range"))
+                .and(header::value(RANGE.as_str()))
                 .map(move |range: HeaderValue| {
                     assert_eq!(range.to_str().unwrap(), "bytes=0-3");
                     let mut response = Response::new("123".into());
