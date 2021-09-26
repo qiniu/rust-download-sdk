@@ -226,7 +226,7 @@ impl Dotter {
                 .name("dots-uploader".into())
                 .spawn(move || {
                     inner.lock_buffered_file(|buffered_file| {
-                        if inner.is_time_to_upload(&buffered_file)? {
+                        if inner.is_time_to_upload(buffered_file)? {
                             inner.sync_upload()?;
                         }
                         Ok(())
