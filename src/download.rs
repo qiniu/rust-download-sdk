@@ -490,9 +490,12 @@ impl ReadAt for RangeReader {
     }
 }
 
+/// 通过 RangeReader::read_multi_ranges() 获取文件的区域以及对应的数据
 #[derive(Debug, Clone)]
 pub struct RangePart {
+    /// 区域对应的数据
     pub data: Vec<u8>,
+    /// 区域的开始偏移量和区域长度
     pub range: (u64, u64),
 }
 
@@ -547,7 +550,7 @@ impl RangeReader {
                                                     "Content-Type must be existed",
                                                 )
                                             })?;
-                                        extract_boundary(&content_type.to_str().map_err(|err| {
+                                        extract_boundary(content_type.to_str().map_err(|err| {
                                             IOError::new(IOErrorKind::InvalidInput, err)
                                         })?)
                                         .ok_or_else(|| {
@@ -1070,7 +1073,7 @@ impl RangeReader {
             if let Some(private_url_lifetime) = private_url_lifetime {
                 Url::parse(
                     &sign_download_url_with_lifetime(
-                        &credential,
+                        credential,
                         Url::parse(url).unwrap(),
                         private_url_lifetime,
                     )

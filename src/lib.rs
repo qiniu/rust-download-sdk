@@ -32,7 +32,7 @@ pub use dot::{
 };
 pub use download::{
     sign_download_url_with_deadline, sign_download_url_with_lifetime, RangeReader,
-    RangeReaderBuilder,
+    RangeReaderBuilder, RangePart,
 };
 pub use req_id::{set_download_start_time, total_download_duration};
 
