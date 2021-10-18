@@ -17,7 +17,7 @@ use std::{
 use tap::prelude::*;
 
 /// 七牛配置信息
-#[derive(Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
 pub struct Config {
     #[serde(alias = "ak")]
     access_key: String,
@@ -45,16 +45,8 @@ pub struct Config {
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
 }
-static QINIU_CONFIG: Lazy<RwLock<Option<Config>>> = Lazy::new(|| {
-    RwLock::new(load_config()).tap(|_| {
-        on_config_updated(|| {
-            if let Some(config) = load_config() {
-                *QINIU_CONFIG.write().unwrap() = Some(config);
-            }
-            info!("QINIU_CONFIG reloaded: {:?}", QINIU_CONFIG);
-        })
-    })
-});
+static QINIU_CONFIG: Lazy<RwLock<Option<Config>>> = Lazy::new(|| RwLock::new(load_config()));
+
 pub(super) static HTTP_CLIENT: Lazy<RwLock<HTTPClient>> = Lazy::new(|| {
     RwLock::new(build_http_client()).tap(|_| {
         on_config_updated(|| {
@@ -70,6 +62,12 @@ pub(super) static HTTP_CLIENT: Lazy<RwLock<HTTPClient>> = Lazy::new(|| {
 #[inline]
 pub fn is_qiniu_enabled() -> bool {
     QINIU_CONFIG.read().unwrap().is_some()
+}
+
+/// 手动设置七牛环境配置
+#[inline]
+pub fn set_qiniu_config(config: Config) {
+    set_config_and_reload(config)
 }
 
 fn build_http_client() -> HTTPClient {
@@ -110,91 +108,106 @@ fn load_config() -> Option<Config> {
             };
             if let Some(qiniu_config) = qiniu_config {
                 setup_config_watcher(&qiniu_config_path).ok();
-                return Some(qiniu_config);
+                Some(qiniu_config)
             } else {
                 error!(
                     "Qiniu config file cannot be deserialized: {}",
                     qiniu_config_path
                 );
-                return None;
+                None
             }
         } else {
             error!("Qiniu config file cannot be open: {}", qiniu_config_path);
-            return None;
+            None
         }
     } else {
         warn!("QINIU Env IS NOT ENABLED");
-        return None;
+        None
+    }
+}
+
+fn setup_config_watcher(config_path: impl Into<PathBuf>) -> IOResult<()> {
+    let config_path = config_path
+        .into()
+        .canonicalize()
+        .tap_err(|err| warn!("Failed to canonicalize config path: {:?}", err))?;
+
+    static UNIQUE_THREAD: OnceCell<JoinHandle<()>> = OnceCell::new();
+
+    if let Err(err) = UNIQUE_THREAD.get_or_try_init(|| {
+        ThreadBuilder::new()
+            .name("qiniu-config-watcher".into())
+            .spawn(move || {
+                if let Err(err) = setup_config_watcher_inner(&config_path) {
+                    error!("Qiniu config file watcher was setup failed: {:?}", err);
+                }
+            })
+    }) {
+        error!(
+            "Failed to start thread to watch Qiniu config file: {:?}",
+            err
+        );
     }
 
-    fn setup_config_watcher(config_path: impl Into<PathBuf>) -> IOResult<()> {
-        let config_path = config_path
-            .into()
-            .canonicalize()
-            .tap_err(|err| warn!("Failed to canonicalize config path: {:?}", err))?;
+    return Ok(());
 
-        static UNIQUE_THREAD: OnceCell<JoinHandle<()>> = OnceCell::new();
+    fn setup_config_watcher_inner(config_path: &Path) -> NotifyResult<()> {
+        let (tx, rx) = channel();
+        let mut watcher = watcher(tx, Duration::from_millis(500))?;
+        watcher.watch(
+            config_path.parent().unwrap_or_else(|| Path::new("/")),
+            RecursiveMode::NonRecursive,
+        )?;
 
-        if let Err(err) = UNIQUE_THREAD.get_or_try_init(|| {
-            ThreadBuilder::new()
-                .name("qiniu-config-watcher".into())
-                .spawn(move || {
-                    if let Err(err) = setup_config_watcher_inner(&config_path) {
-                        error!("Qiniu config file watcher was setup failed: {:?}", err);
+        info!("Qiniu config file watcher was setup");
+
+        loop {
+            match rx.recv() {
+                Ok(event) => match event {
+                    DebouncedEvent::Create(ref path) if path == config_path => {
+                        event_received(event);
                     }
-                })
-        }) {
-            error!(
-                "Failed to start thread to watch Qiniu config file: {:?}",
-                err
-            );
-        }
-
-        return Ok(());
-
-        fn setup_config_watcher_inner(config_path: &Path) -> NotifyResult<()> {
-            let (tx, rx) = channel();
-            let mut watcher = watcher(tx, Duration::from_millis(500))?;
-            watcher.watch(
-                config_path.parent().unwrap_or_else(|| Path::new("/")),
-                RecursiveMode::NonRecursive,
-            )?;
-
-            info!("Qiniu config file watcher was setup");
-
-            loop {
-                match rx.recv() {
-                    Ok(event) => match event {
-                        DebouncedEvent::Create(ref path) if path == config_path => {
-                            event_received(event);
-                        }
-                        DebouncedEvent::Write(ref path) if path == config_path => {
-                            event_received(event);
-                        }
-                        DebouncedEvent::Error(err, _) => {
-                            error!(
-                                "Received error event from Qiniu config file watcher: {:?}",
-                                err
-                            );
-                        }
-                        _ => {}
-                    },
-                    Err(err) => {
+                    DebouncedEvent::Write(ref path) if path == config_path => {
+                        event_received(event);
+                    }
+                    DebouncedEvent::Error(err, _) => {
                         error!(
-                            "Failed to receive event from Qiniu config file watcher: {:?}",
+                            "Received error event from Qiniu config file watcher: {:?}",
                             err
                         );
                     }
+                    _ => {}
+                },
+                Err(err) => {
+                    error!(
+                        "Failed to receive event from Qiniu config file watcher: {:?}",
+                        err
+                    );
                 }
             }
         }
+    }
 
-        fn event_received(event: DebouncedEvent) {
-            info!("Received event {:?} from Qiniu config file watcher", event);
-            for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
-                handle();
-            }
-        }
+    #[inline]
+    fn event_received(event: DebouncedEvent) {
+        info!("Received event {:?} from Qiniu config file watcher", event);
+        reload_config();
+    }
+}
+
+#[inline]
+fn reload_config() {
+    if let Some(config) = load_config() {
+        set_config_and_reload(config);
+    }
+}
+
+#[inline]
+fn set_config_and_reload(config: Config) {
+    *QINIU_CONFIG.write().unwrap() = Some(config);
+    info!("QINIU_CONFIG reloaded: {:?}", QINIU_CONFIG);
+    for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
+        handle();
     }
 }
 
@@ -551,5 +564,51 @@ mod tests {
         remove_file(&tempfile_path)?;
 
         Ok(())
+    }
+
+    #[test]
+    fn test_set_config() {
+        env_logger::try_init().ok();
+
+        let mut config = Config {
+            access_key: "test-ak-1".into(),
+            secret_key: "test-sk-1".into(),
+            bucket: "test-bucket-1".into(),
+            io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
+            uc_urls: Default::default(),
+            monitor_urls: Default::default(),
+            sim: Default::default(),
+            normalize_key: Default::default(),
+            private: Default::default(),
+            retry: Default::default(),
+            dot_interval_s: Default::default(),
+            max_dot_buffer_size: Default::default(),
+            punish_time_s: Default::default(),
+            base_timeout_ms: Default::default(),
+            dial_timeout_ms: Default::default(),
+        };
+
+        static UPDATED: AtomicUsize = AtomicUsize::new(0);
+        UPDATED.store(0, Relaxed);
+
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+
+        set_qiniu_config(config.to_owned());
+        assert_eq!(UPDATED.load(Relaxed), 3);
+
+        config.access_key = "test-ak-2".into();
+        config.secret_key = "test-sk-2".into();
+        config.bucket = "test-bucket-2".into();
+
+        set_qiniu_config(config);
+        assert_eq!(UPDATED.load(Relaxed), 6);
     }
 }

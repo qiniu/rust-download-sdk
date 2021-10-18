@@ -25,14 +25,14 @@ mod req_id;
 
 pub use base::credential::Credential;
 use config::HTTP_CLIENT;
-pub use config::{is_qiniu_enabled, Config, ConfigBuilder};
+pub use config::{is_qiniu_enabled, set_qiniu_config, Config, ConfigBuilder};
 pub use dot::{
     disable_dot_uploading, disable_dotting, enable_dot_uploading, enable_dotting,
     is_dot_uploading_disabled, is_dotting_disabled,
 };
 pub use download::{
-    sign_download_url_with_deadline, sign_download_url_with_lifetime, RangeReader,
-    RangeReaderBuilder, RangePart,
+    sign_download_url_with_deadline, sign_download_url_with_lifetime, RangePart, RangeReader,
+    RangeReaderBuilder,
 };
 pub use req_id::{set_download_start_time, total_download_duration};
 
