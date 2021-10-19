@@ -17,7 +17,7 @@ use std::{
 use tap::prelude::*;
 
 /// 七牛配置信息
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
 pub struct Config {
     #[serde(alias = "ak")]
     access_key: String,
@@ -44,6 +44,7 @@ pub struct Config {
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
+    disable_hot_reloading: Option<bool>,
 }
 static QINIU_CONFIG: Lazy<RwLock<Option<Config>>> = Lazy::new(|| RwLock::new(load_config()));
 
@@ -107,7 +108,12 @@ fn load_config() -> Option<Config> {
                 serde_json::from_slice(&qiniu_config).ok()
             };
             if let Some(qiniu_config) = qiniu_config {
-                setup_config_watcher(&qiniu_config_path).ok();
+                match qiniu_config.disable_hot_reloading {
+                    Some(false) | None => {
+                        setup_config_watcher(&qiniu_config_path).ok();
+                    }
+                    _ => {}
+                }
                 Some(qiniu_config)
             } else {
                 error!(
@@ -331,17 +337,7 @@ impl ConfigBuilder {
                 secret_key: secret_key.into(),
                 bucket: bucket.into(),
                 io_urls,
-                uc_urls: None,
-                monitor_urls: None,
-                sim: None,
-                normalize_key: None,
-                private: None,
-                retry: None,
-                punish_time_s: None,
-                base_timeout_ms: None,
-                dial_timeout_ms: None,
-                dot_interval_s: None,
-                max_dot_buffer_size: None,
+                ..Default::default()
             },
         }
     }
@@ -435,8 +431,8 @@ impl ConfigBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Result;
     use std::{
-        error::Error,
         fs::{remove_file, rename, OpenOptions},
         io::Write,
         sync::atomic::{AtomicUsize, Ordering::Relaxed},
@@ -445,7 +441,7 @@ mod tests {
     use tempfile::Builder as TempFileBuilder;
 
     #[test]
-    fn test_load_config() -> Result<(), Box<dyn Error>> {
+    fn test_load_config() -> Result<()> {
         env_logger::try_init().ok();
 
         let mut config = Config {
@@ -453,17 +449,7 @@ mod tests {
             secret_key: "test-sk-1".into(),
             bucket: "test-bucket-1".into(),
             io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
-            uc_urls: Default::default(),
-            monitor_urls: Default::default(),
-            sim: Default::default(),
-            normalize_key: Default::default(),
-            private: Default::default(),
-            retry: Default::default(),
-            dot_interval_s: Default::default(),
-            max_dot_buffer_size: Default::default(),
-            punish_time_s: Default::default(),
-            base_timeout_ms: Default::default(),
-            dial_timeout_ms: Default::default(),
+            ..Default::default()
         };
         let tempfile_path = {
             let mut tempfile = TempFileBuilder::new().suffix(".toml").tempfile()?;
@@ -575,17 +561,7 @@ mod tests {
             secret_key: "test-sk-1".into(),
             bucket: "test-bucket-1".into(),
             io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
-            uc_urls: Default::default(),
-            monitor_urls: Default::default(),
-            sim: Default::default(),
-            normalize_key: Default::default(),
-            private: Default::default(),
-            retry: Default::default(),
-            dot_interval_s: Default::default(),
-            max_dot_buffer_size: Default::default(),
-            punish_time_s: Default::default(),
-            base_timeout_ms: Default::default(),
-            dial_timeout_ms: Default::default(),
+            ..Default::default()
         };
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
@@ -610,5 +586,62 @@ mod tests {
 
         set_qiniu_config(config);
         assert_eq!(UPDATED.load(Relaxed), 6);
+    }
+
+    #[test]
+    fn test_load_config_without_hot_reloading() -> Result<()> {
+        env_logger::try_init().ok();
+
+        let mut config = Config {
+            access_key: "test-ak-1".into(),
+            secret_key: "test-sk-1".into(),
+            bucket: "test-bucket-1".into(),
+            io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
+            disable_hot_reloading: Some(true),
+            ..Default::default()
+        };
+        let tempfile_path = {
+            let mut tempfile = TempFileBuilder::new().suffix(".toml").tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            env::set_var(QINIU_ENV, tempfile.path().as_os_str());
+            tempfile.into_temp_path()
+        };
+
+        static UPDATED: AtomicUsize = AtomicUsize::new(0);
+        UPDATED.store(0, Relaxed);
+
+        let loaded = load_config().unwrap();
+        assert_eq!(loaded, config);
+
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+        on_config_updated(|| {
+            UPDATED.fetch_add(1, Relaxed);
+        });
+
+        sleep(Duration::from_secs(1));
+
+        config.access_key = "test-ak-2".into();
+        config.secret_key = "test-sk-2".into();
+        config.bucket = "test-bucket-2".into();
+
+        {
+            let mut tempfile = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&tempfile_path)?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+        }
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 0);
+
+        Ok(())
     }
 }
