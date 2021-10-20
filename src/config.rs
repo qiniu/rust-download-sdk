@@ -44,7 +44,6 @@ pub struct Config {
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
-    disable_hot_reloading: Option<bool>,
 }
 static QINIU_CONFIG: Lazy<RwLock<Option<Config>>> = Lazy::new(|| RwLock::new(load_config()));
 
@@ -98,6 +97,7 @@ fn build_http_client() -> HTTPClient {
 }
 
 const QINIU_ENV: &str = "QINIU";
+const QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV: &str = "QINIU_DISABLE_CONFIG_HOT_RELOADING";
 
 fn load_config() -> Option<Config> {
     if let Ok(qiniu_config_path) = env::var(QINIU_ENV) {
@@ -108,11 +108,8 @@ fn load_config() -> Option<Config> {
                 serde_json::from_slice(&qiniu_config).ok()
             };
             if let Some(qiniu_config) = qiniu_config {
-                match qiniu_config.disable_hot_reloading {
-                    Some(false) | None => {
-                        setup_config_watcher(&qiniu_config_path).ok();
-                    }
-                    _ => {}
+                if env::var_os(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV).is_none() {
+                    setup_config_watcher(&qiniu_config_path).ok();
                 }
                 Some(qiniu_config)
             } else {
@@ -592,12 +589,30 @@ mod tests {
     fn test_load_config_without_hot_reloading() -> Result<()> {
         env_logger::try_init().ok();
 
+        struct QiniuHotReloadingEnvGuard;
+
+        impl QiniuHotReloadingEnvGuard {
+            #[inline]
+            fn new() -> Self {
+                env::set_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV, "1");
+                Self
+            }
+        }
+
+        impl Drop for QiniuHotReloadingEnvGuard {
+            #[inline]
+            fn drop(&mut self) {
+                env::remove_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV)
+            }
+        }
+
+        let _guard = QiniuHotReloadingEnvGuard::new();
+
         let mut config = Config {
             access_key: "test-ak-1".into(),
             secret_key: "test-sk-1".into(),
             bucket: "test-bucket-1".into(),
             io_urls: Some(vec!["http://io1.com".into(), "http://io2.com".into()]),
-            disable_hot_reloading: Some(true),
             ..Default::default()
         };
         let tempfile_path = {
