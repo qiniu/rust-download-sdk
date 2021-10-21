@@ -1142,7 +1142,7 @@ mod tests {
     use super::{
         super::{
             cache_dir_path_of,
-            dot::{DotRecordKey, DotRecords, DotRecordsDashMap},
+            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,
     };
@@ -1967,7 +1967,7 @@ mod tests {
                 Err(err)
             }
         })?;
-        let dot_file_path = cache_dir_path_of("dot-file")?;
+        let dot_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
         std::fs::remove_file(&dot_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())

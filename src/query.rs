@@ -5,7 +5,7 @@ use super::{
     HTTP_CLIENT,
 };
 use dashmap::DashMap;
-use log::{debug, warn};
+use log::{info, warn};
 use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use serde::{
@@ -18,6 +18,7 @@ use std::{
     fmt,
     fs::OpenOptions,
     io::{Error as IOError, ErrorKind as IOErrorKind, Result as IOResult},
+    path::Path,
     sync::Mutex,
     thread::spawn,
     time::{Duration, Instant, SystemTime},
@@ -196,9 +197,7 @@ impl HostsQuerier {
                 }
             });
         } else if modified {
-            spawn(move || {
-                let _ = save_cache();
-            });
+            spawn(save_cache);
         }
 
         Ok(cache_value.cached_response_body.to_owned())
@@ -217,7 +216,7 @@ fn query_for_domains_without_cache(
         uc_tries,
         dotter,
         |host, timeout_power, timeout| {
-            debug!(
+            info!(
                 "try to query hosts from {}, ak = {}, bucket = {}",
                 host,
                 ak.as_ref(),
@@ -270,7 +269,7 @@ fn query_for_domains_without_cache(
                     }
                 })
                 .tap_ok(|_| {
-                    debug!(
+                    info!(
                         "update query cache for ak = {}, bucket = {} is successful",
                         ak.as_ref(),
                         bucket.as_ref(),
@@ -322,35 +321,64 @@ fn query_for_domains_without_cache(
     }
 }
 
+const CACHE_FILE_NAME: &str = "query-cache.json";
+
 fn load_cache() -> IOResult<()> {
-    let cache_file_path = cache_dir_path_of("query-cache.json")?;
-    if let Ok(cache_file) = OpenOptions::new().read(true).open(&cache_file_path) {
-        let cache: HashMap<CacheKey, CacheValue> =
-            json_from_reader(cache_file).map_err(|err| IOError::new(IOErrorKind::Other, err))?;
-        CACHE_MAP.clear();
-        for (key, value) in cache.into_iter() {
-            CACHE_MAP.insert(key, value);
+    let cache_file_path = cache_dir_path_of(CACHE_FILE_NAME)?;
+    match OpenOptions::new().read(true).open(&cache_file_path) {
+        Ok(cache_file) => {
+            let cache: HashMap<CacheKey, CacheValue> = json_from_reader(cache_file)
+                .tap_err(|err| {
+                    warn!(
+                        "Failed to parse cache from cache file {:?}: {}",
+                        cache_file_path, err
+                    )
+                })
+                .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
+            CACHE_MAP.clear();
+            for (key, value) in cache.into_iter() {
+                CACHE_MAP.insert(key, value);
+            }
+        }
+        Err(err) => {
+            info!(
+                "Cache file is failed to open {:?}: {}",
+                cache_file_path, err
+            );
         }
     }
     Ok(())
 }
 
 fn save_cache() -> IOResult<()> {
-    let cache_file_path = cache_dir_path_of("query-cache.json")?;
-
+    let cache_file_path = cache_dir_path_of(CACHE_FILE_NAME)?;
     let cache_file_lock_result = CACHE_FILE_LOCK.try_lock();
     if cache_file_lock_result.is_err() {
+        info!(
+            "Cache file is locked, cannot save to {:?} now",
+            cache_file_path
+        );
         return Ok(());
     }
 
-    let mut cache_file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .open(&cache_file_path)?;
-    json_to_writer(&mut cache_file, &*CACHE_MAP)
-        .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
-    Ok(())
+    if let Err(err) = _save_cache(&cache_file_path) {
+        warn!("Failed to save cache {:?}: {}", cache_file_path, err);
+    } else {
+        info!("Save cache to {:?} successfully", cache_file_path);
+    }
+    return Ok(());
+
+    #[inline]
+    fn _save_cache(cache_file_path: &Path) -> anyhow::Result<()> {
+        let mut cache_file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(cache_file_path)?;
+        json_to_writer(&mut cache_file, &*CACHE_MAP)
+            .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -358,7 +386,7 @@ mod tests {
     use super::{
         super::{
             base::credential::Credential,
-            dot::{DotRecordKey, DotRecords, DotRecordsDashMap},
+            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,
     };
@@ -608,7 +636,7 @@ mod tests {
     }
 
     fn clear_cache() -> IOResult<()> {
-        let cache_file_path = cache_dir_path_of("query-cache.json")?;
+        let cache_file_path = cache_dir_path_of(CACHE_FILE_NAME)?;
         std::fs::remove_file(&cache_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
@@ -616,7 +644,7 @@ mod tests {
                 Err(err)
             }
         })?;
-        let dot_file_path = cache_dir_path_of("dot-file")?;
+        let dot_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
         std::fs::remove_file(&dot_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())

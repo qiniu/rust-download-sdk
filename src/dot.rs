@@ -134,6 +134,8 @@ struct DotterInner {
     tries: usize,
 }
 
+pub(super) const DOT_FILE_NAME: &str = "dot-file";
+
 impl Dotter {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
@@ -149,7 +151,7 @@ impl Dotter {
         base_timeout: Option<Duration>,
     ) -> Dotter {
         if !monitor_urls.is_empty() {
-            if let Ok(buffered_file_path) = cache_dir_path_of("dot-file") {
+            if let Ok(buffered_file_path) = cache_dir_path_of(DOT_FILE_NAME) {
                 if let Ok(buffer_file) = OpenOptions::new()
                     .create(true)
                     .write(true)
@@ -314,7 +316,7 @@ impl DotterInner {
         let mut buffered_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&cache_dir_path_of("dot-file")?)?;
+            .open(&cache_dir_path_of(DOT_FILE_NAME)?)?;
         self.upload_with_retry(|monitor_host, timeout, timeout_power| {
             let url = format!("{}/v1/stat", monitor_host);
             debug!("try to upload dots to {}", url);
@@ -1225,7 +1227,7 @@ mod tests {
     }
 
     fn clear_cache() -> IOResult<()> {
-        let cache_file_path = cache_dir_path_of("dot-file")?;
+        let cache_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
         std::fs::remove_file(&cache_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
