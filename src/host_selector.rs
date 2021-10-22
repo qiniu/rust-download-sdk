@@ -179,12 +179,6 @@ impl HostsUpdater {
         *self.hosts.write().unwrap() = hosts;
     }
 
-    #[inline]
-    #[cfg(test)]
-    pub(super) fn all_hosts(&self) -> Vec<String> {
-        self.hosts.read().unwrap().to_owned()
-    }
-
     fn update_hosts(&self) -> bool {
         if let Some(update_option) = &self.update_option {
             if let Ok(new_hosts) = (update_option.func)() {
@@ -453,9 +447,24 @@ impl HostSelector {
     }
 
     #[inline]
-    #[cfg(test)]
-    pub(super) fn all_hosts(&self) -> Vec<String> {
-        self.hosts_updater.all_hosts()
+    pub(super) fn hosts(&self) -> Vec<String> {
+        self.hosts_updater
+            .hosts
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|&host| {
+                self.hosts_updater
+                    .hosts_map
+                    .get(host)
+                    .map(|punished_info| {
+                        self.host_punisher.is_punishment_expired(&punished_info)
+                            || self.host_punisher.is_available(&punished_info)
+                    })
+                    .unwrap_or(true)
+            })
+            .cloned()
+            .collect()
     }
 
     #[inline]

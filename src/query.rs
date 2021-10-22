@@ -121,6 +121,7 @@ impl HostsQuerier {
         }
     }
 
+    #[inline]
     pub(super) fn query_for_io_urls(
         &self,
         ak: &str,
@@ -140,6 +141,7 @@ impl HostsQuerier {
             .map(|domain| normalize_domain(domain, use_https))
             .collect());
 
+        #[inline]
         fn normalize_domain(domain: &str, use_https: bool) -> String {
             if domain.contains("://") {
                 domain.to_string()
@@ -539,7 +541,7 @@ mod tests {
                 let querier = HostsQuerier::new(host_selector, 1, dotter);
                 let io_urls = querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(&io_urls, &["http://iovip.qbox.me".to_owned()]);
-                assert_eq!(&querier.uc_selector.all_hosts(), &["uc.qbox.me".to_owned()]);
+                assert_eq!(&querier.uc_selector.hosts(), &["uc.qbox.me".to_owned()]);
                 assert_eq!(&querier.uc_selector.select_host().host, "uc.qbox.me");
                 sleep(Duration::from_secs(5));
                 assert_eq!(monitor_called.load(Relaxed), 1);

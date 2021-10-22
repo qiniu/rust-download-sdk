@@ -339,20 +339,48 @@ impl ConfigBuilder {
         }
     }
 
+    /// 配置七牛 Access Key
+    #[inline]
+    pub fn access_key(mut self, access_key: impl Into<String>) -> Self {
+        self.inner.access_key = access_key.into();
+        self
+    }
+
+    /// 配置七牛 Secret Key
+    #[inline]
+    pub fn secret_key(mut self, secret_key: impl Into<String>) -> Self {
+        self.inner.secret_key = secret_key.into();
+        self
+    }
+
+    /// 配置七牛存储空间
+    #[inline]
+    pub fn bucket(mut self, bucket: impl Into<String>) -> Self {
+        self.inner.bucket = bucket.into();
+        self
+    }
+
+    /// 配置 IO 服务器 URL 列表
+    #[inline]
+    pub fn io_urls(mut self, io_urls: Option<Vec<String>>) -> Self {
+        self.inner.io_urls = io_urls;
+        self
+    }
+
     /// 构建七牛配置信息
     #[inline]
     pub fn build(self) -> Config {
         self.inner
     }
 
-    /// 配置 UC 服务器域名列表
+    /// 配置 UC 服务器 URL 列表
     #[inline]
     pub fn uc_urls(mut self, uc_urls: Option<Vec<String>>) -> Self {
         self.inner.uc_urls = uc_urls;
         self
     }
 
-    /// 配置监控服务器域名列表，如果不配置或配置为空，则不会启用打点功能
+    /// 配置监控服务器 URL 列表，如果不配置或配置为空，则不会启用打点功能
     #[inline]
     pub fn monitor_urls(mut self, monitor_urls: Option<Vec<String>>) -> Self {
         self.inner.monitor_urls = monitor_urls;
@@ -422,6 +450,13 @@ impl ConfigBuilder {
     pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: Option<u64>) -> Self {
         self.inner.max_dot_buffer_size = max_dot_buffer_size;
         self
+    }
+}
+
+impl From<Config> for ConfigBuilder {
+    #[inline]
+    fn from(config: Config) -> Self {
+        ConfigBuilder { inner: config }
     }
 }
 

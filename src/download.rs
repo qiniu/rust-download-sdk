@@ -91,6 +91,7 @@ struct RangeReaderInner {
     tries: usize,
     use_getfile_api: bool,
     normalize_key: bool,
+    use_https: bool,
     private_url_lifetime: Option<Duration>,
 }
 
@@ -341,6 +342,7 @@ impl RangeReaderBuilder {
                 tries: self.io_tries,
                 use_getfile_api: self.use_getfile_api,
                 normalize_key: self.normalize_key,
+                use_https: self.use_https,
                 private_url_lifetime: self.private_url_lifetime,
             }),
             self.key,
@@ -423,8 +425,30 @@ impl RangeReader {
     /// 主动更新域名列表
     ///
     /// 如果返回为 true 表示更新成功，否则返回 false
-    pub fn update_hosts(&self) -> bool {
+    pub fn update_urls(&self) -> bool {
         self.inner.io_selector.update_hosts()
+    }
+
+    /// 获取当前可用的 IO 节点的域名
+    pub fn io_urls(&self) -> Vec<String> {
+        return self
+            .inner
+            .io_selector
+            .hosts()
+            .iter()
+            .map(|host| normalize_host(host, self.inner.use_https))
+            .collect();
+
+        #[inline]
+        fn normalize_host(host: &str, use_https: bool) -> String {
+            if host.contains("://") {
+                host.to_string()
+            } else if use_https {
+                "https://".to_owned() + host
+            } else {
+                "http://".to_owned() + host
+            }
+        }
     }
 }
 
@@ -2005,7 +2029,9 @@ mod tests {
                     .normalize_key(true)
                     .build();
             spawn_blocking(move || {
-                assert!(downloader.update_hosts());
+                assert_eq!(downloader.io_urls(), io_urls);
+                assert!(downloader.update_urls());
+                assert_eq!(downloader.io_urls(), vec![format!("http://{}", io_addr)]);
                 assert_eq!(&downloader.download().unwrap(), b"12345");
             })
             .await?;
