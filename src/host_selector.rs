@@ -216,7 +216,7 @@ impl HostsUpdater {
 
         fn try_to_auto_update_in_thread(updater: Arc<HostsUpdater>) {
             if let Some(update_option) = &updater.update_option {
-                if let Ok(mut last_updated_at) = update_option.last_updated_at.try_lock() {
+                if let Ok(mut last_updated_at) = update_option.last_updated_at.lock() {
                     if last_updated_at.elapsed() >= update_option.interval {
                         if updater.update_hosts() {
                             info!("`host-selector-auto-updater` update hosts successfully");
@@ -438,6 +438,24 @@ impl HostSelector {
     #[inline]
     pub(super) fn builder(hosts: Vec<String>) -> HostSelectorBuilder {
         HostSelectorBuilder::new(hosts)
+    }
+
+    #[inline]
+    pub(super) fn update_hosts(&self) -> bool {
+        if self.hosts_updater.update_hosts() {
+            info!("manual update hosts successfully");
+            if let Some(mut last_updated_at) = self
+                .hosts_updater
+                .update_option
+                .as_ref()
+                .and_then(|option| option.last_updated_at.lock().ok())
+            {
+                *last_updated_at = Instant::now();
+            }
+            true
+        } else {
+            false
+        }
     }
 
     pub(super) fn select_host(&self) -> HostInfo {

@@ -419,6 +419,13 @@ impl RangeReader {
                 .map(|v| v.0)
         }
     }
+
+    /// 主动更新域名列表
+    ///
+    /// 如果返回为 true 表示更新成功，否则返回 false
+    pub fn update_hosts(&self) -> bool {
+        self.inner.io_selector.update_hosts()
+    }
 }
 
 impl ReadAt for RangeReader {
@@ -1148,6 +1155,7 @@ mod tests {
     };
     use futures::{channel::oneshot::channel, future::join};
     use multipart::client::lazy::Multipart;
+    use serde_json::{json, to_vec as json_to_vec};
     use std::{
         boxed::Box,
         error::Error,
@@ -1183,13 +1191,13 @@ mod tests {
             tx.send(()).ok();
             handler.await.ok();
         }};
-        ($uc_addr:ident, $monitor_addr:ident, $uc_routes:ident, $records_map:ident, $code:block) => {{
-            let (uc_tx, uc_rx) = channel();
+        ($io_addr:ident, $monitor_addr:ident, $io_routes:ident, $records_map:ident, $code:block) => {{
+            let (io_tx, io_rx) = channel();
             let (monitor_tx, monitor_rx) = channel();
-            let ($uc_addr, uc_server) = warp::serve($uc_routes).bind_with_graceful_shutdown(
+            let ($io_addr, io_server) = warp::serve($io_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    uc_rx.await.ok();
+                    io_rx.await.ok();
                 },
             );
             let $records_map = Arc::new(DotRecordsDashMap::default());
@@ -1208,12 +1216,48 @@ mod tests {
                 .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
                     monitor_rx.await.ok();
                 });
-            let uc_handler = spawn(uc_server);
+            let io_handler = spawn(io_server);
             let monitor_handler = spawn(monitor_server);
             $code;
-            uc_tx.send(()).ok();
+            io_tx.send(()).ok();
             monitor_tx.send(()).ok();
-            let _ = join(uc_handler, monitor_handler).await;
+            let _ = join(io_handler, monitor_handler).await;
+        }};
+        ($io_addr:ident, $uc_addr:ident, $io_routes:ident, $code:block) => {{
+            let (io_tx, io_rx) = channel();
+            let (uc_tx, uc_rx) = channel();
+            let ($io_addr, io_server) = warp::serve($io_routes).bind_with_graceful_shutdown(
+                ([127, 0, 0, 1], 0),
+                async move {
+                    io_rx.await.ok();
+                },
+            );
+            let io_addr = $io_addr.to_owned();
+            let uc_routes = {
+                path!("v4" / "query")
+                    .map(move || {
+                        Response::new(json_to_vec(&json!({
+                            "hosts": [{
+                                "ttl": 86400,
+                                "io": {
+                                    "domains": [io_addr]
+                                }
+                            }]
+                        })).unwrap().into())
+                    })
+            };
+            let ($uc_addr, uc_server) = warp::serve(uc_routes).bind_with_graceful_shutdown(
+                ([127, 0, 0, 1], 0),
+                async move {
+                    uc_rx.await.ok();
+                },
+            );
+            let io_handler = spawn(io_server);
+            let uc_handler = spawn(uc_server);
+            $code;
+            io_tx.send(()).ok();
+            uc_tx.send(()).ok();
+            let _ = join(io_handler, uc_handler).await;
         }};
     }
 
@@ -1245,8 +1289,8 @@ mod tests {
             action_1.or(action_2)
         };
 
-        starts_with_server!(uc_addr, monitor_addr, io_routes, records_map, {
-            let io_urls = vec![format!("http://{}", uc_addr)];
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
             {
                 let downloader =
                     RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
@@ -1936,6 +1980,30 @@ mod tests {
                 assert_eq!(parts.len(), 1);
                 assert_eq!(&parts.get(0).unwrap().data, b"123");
                 assert_eq!(parts.get(0).unwrap().range, (0, 3));
+            })
+            .await?;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_update_hosts() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+        clear_cache()?;
+
+        let routes = { path!("file").map(move || Response::new("12345".into())) };
+        starts_with_server!(io_addr, uc_addr, routes, {
+            let io_urls = vec!["http://fakedomain:12345".to_owned()];
+            let uc_urls = vec![format!("http://{}", uc_addr)];
+            let downloader =
+                RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
+                    .uc_urls(uc_urls)
+                    .use_getfile_api(false)
+                    .normalize_key(true)
+                    .build();
+            spawn_blocking(move || {
+                assert!(downloader.update_hosts());
+                assert_eq!(&downloader.download().unwrap(), b"12345");
             })
             .await?;
         });
