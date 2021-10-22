@@ -1,14 +1,13 @@
 use super::{
     base::credential::Credential,
     config::{
-        build_range_reader_builder_from_config, build_range_reader_builder_from_env,
+        build_range_reader_builder_from_config, build_range_reader_builder_from_env, http_client,
         on_config_updated, Config,
     },
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
-    HTTP_CLIENT,
 };
 use log::{debug, error, info, warn};
 use multipart::server::Multipart;
@@ -1013,7 +1012,7 @@ impl RangeReader {
             );
             let req_id = get_req_id(begin_at, tries);
             let request_begin_at_instant = Instant::now();
-            let request_builder = HTTP_CLIENT
+            let request_builder = http_client()
                 .read()
                 .unwrap()
                 .request(method.to_owned(), download_url.to_owned())

@@ -1,8 +1,8 @@
 use super::{
     base::{credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token},
     cache_dir_path_of,
+    config::http_client,
     host_selector::{HostSelector, PunishResult},
-    HTTP_CLIENT,
 };
 use dashmap::DashMap;
 use fd_lock::FdLock;
@@ -328,7 +328,7 @@ impl DotterInner {
                 ),
             );
             let begin_at = Instant::now();
-            HTTP_CLIENT
+            http_client()
                 .read()
                 .unwrap()
                 .post(&url)

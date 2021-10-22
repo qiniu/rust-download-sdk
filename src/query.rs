@@ -1,8 +1,8 @@
 use super::{
     cache_dir_path_of,
+    config::http_client,
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
-    HTTP_CLIENT,
 };
 use dashmap::DashMap;
 use log::{info, warn};
@@ -235,7 +235,7 @@ fn query_for_domains_without_cache(
                 warn!("uc host {} is invalid", host);
             })?;
 
-            HTTP_CLIENT
+            http_client()
                 .read()
                 .unwrap()
                 .get(&url.to_string())
