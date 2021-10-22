@@ -179,6 +179,12 @@ impl HostsUpdater {
         *self.hosts.write().unwrap() = hosts;
     }
 
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn all_hosts(&self) -> Vec<String> {
+        self.hosts.read().unwrap().to_owned()
+    }
+
     fn update_hosts(&self) -> bool {
         if let Some(update_option) = &self.update_option {
             if let Ok(new_hosts) = (update_option.func)() {
@@ -428,6 +434,7 @@ impl HostSelectorBuilder {
     }
 }
 
+#[derive(Debug, Clone)]
 pub(super) struct HostInfo {
     pub(super) host: String,
     pub(super) timeout_power: usize,
@@ -438,6 +445,17 @@ impl HostSelector {
     #[inline]
     pub(super) fn builder(hosts: Vec<String>) -> HostSelectorBuilder {
         HostSelectorBuilder::new(hosts)
+    }
+
+    #[inline]
+    pub(super) fn set_hosts(&self, hosts: Vec<String>) {
+        self.hosts_updater.set_hosts(hosts)
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn all_hosts(&self) -> Vec<String> {
+        self.hosts_updater.all_hosts()
     }
 
     #[inline]

@@ -1241,6 +1241,9 @@ mod tests {
                                 "ttl": 86400,
                                 "io": {
                                     "domains": [io_addr]
+                                },
+                                "uc": {
+                                    "domains": []
                                 }
                             }]
                         })).unwrap().into())

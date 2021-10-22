@@ -90,6 +90,7 @@ struct ResponseBody {
 struct RegionResponseBody {
     ttl: u64,
     io: DomainsResponseBody,
+    uc: DomainsResponseBody,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -254,6 +255,22 @@ fn query_for_domains_without_cache(
                         let body = uc_selector.wrap_reader(resp, host, timeout_power);
                         serde_json::from_reader::<_, ResponseBody>(body)
                             .map_err(|err| IOError::new(IOErrorKind::BrokenPipe, err))
+                    }
+                })
+                .tap_ok(|body| {
+                    let uc_hosts: Vec<_> = body
+                        .hosts
+                        .first()
+                        .map(|host| {
+                            host.uc
+                                .domains
+                                .iter()
+                                .map(|domain| domain.to_string())
+                                .collect()
+                        })
+                        .expect("No host in uc query v4 response body");
+                    if !uc_hosts.is_empty() {
+                        uc_selector.set_hosts(uc_hosts);
                     }
                 })
                 .map(|body| {
@@ -471,6 +488,11 @@ mod tests {
                               "domains": [
                                 "iovip.qbox.me"
                               ]
+                            },
+                            "uc": {
+                              "domains": [
+                                "uc.qbox.me"
+                              ]
                             }
                         }]
                     })
@@ -514,12 +536,11 @@ mod tests {
                 let host_selector =
                     HostSelector::builder(vec!["http://".to_owned() + &uc_addr.to_string()])
                         .build();
-                let io_urls = HostsQuerier::new(host_selector, 1, dotter).query_for_io_urls(
-                    ACCESS_KEY,
-                    BUCKET_NAME,
-                    false,
-                )?;
-                assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
+                let querier = HostsQuerier::new(host_selector, 1, dotter);
+                let io_urls = querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
+                assert_eq!(&io_urls, &["http://iovip.qbox.me".to_owned()]);
+                assert_eq!(&querier.uc_selector.all_hosts(), &["uc.qbox.me".to_owned()]);
+                assert_eq!(&querier.uc_selector.select_host().host, "uc.qbox.me");
                 sleep(Duration::from_secs(5));
                 assert_eq!(monitor_called.load(Relaxed), 1);
                 Ok(())
@@ -556,6 +577,9 @@ mod tests {
                                   "domains": [
                                     "iovip.qbox.me"
                                   ]
+                                },
+                                "uc": {
+                                  "domains": []
                                 }
                             }]
                         })
