@@ -16,7 +16,7 @@ use serde_json::{from_reader as json_from_reader, to_writer as json_to_writer};
 use std::{
     collections::HashMap,
     fmt,
-    fs::OpenOptions,
+    fs::{rename as rename_file, OpenOptions},
     io::{Error as IOError, ErrorKind as IOErrorKind, Result as IOResult},
     path::Path,
     sync::Mutex,
@@ -341,6 +341,7 @@ fn query_for_domains_without_cache(
 }
 
 const CACHE_FILE_NAME: &str = "query-cache.json";
+const CACHE_TEMPFILE_NAME: &str = "query-cache.tmp.json";
 
 fn load_cache() -> IOResult<()> {
     let cache_file_path = cache_dir_path_of(CACHE_FILE_NAME)?;
@@ -371,6 +372,7 @@ fn load_cache() -> IOResult<()> {
 
 fn save_cache() -> IOResult<()> {
     let cache_file_path = cache_dir_path_of(CACHE_FILE_NAME)?;
+    let cache_tempfile_path = cache_dir_path_of(CACHE_TEMPFILE_NAME)?;
     let cache_file_lock_result = CACHE_FILE_LOCK.try_lock();
     if cache_file_lock_result.is_err() {
         info!(
@@ -379,11 +381,21 @@ fn save_cache() -> IOResult<()> {
         );
         return Ok(());
     }
-
-    if let Err(err) = _save_cache(&cache_file_path) {
+    if let Err(err) = _save_cache(&cache_tempfile_path) {
         warn!("Failed to save cache {:?}: {}", cache_file_path, err);
     } else {
         info!("Save cache to {:?} successfully", cache_file_path);
+        if let Err(err) = rename_file(&cache_tempfile_path, &cache_file_path) {
+            warn!(
+                "Failed to move cache file from {:?} to {:?}: {}",
+                cache_tempfile_path, cache_file_path, err
+            );
+        } else {
+            info!(
+                "Move cache from {:?} to {:?} successfully",
+                cache_tempfile_path, cache_file_path
+            );
+        }
     }
     return Ok(());
 
