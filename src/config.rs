@@ -345,14 +345,42 @@ impl ConfigBuilder {
         self.inner
     }
 
-    /// 配置 UC 服务器域名列表
+    /// 配置七牛 Access Key
+    #[inline]
+    pub fn access_key(mut self, access_key: impl Into<String>) -> Self {
+        self.inner.access_key = access_key.into();
+        self
+    }
+
+    /// 配置七牛 Secret Key
+    #[inline]
+    pub fn secret_key(mut self, secret_key: impl Into<String>) -> Self {
+        self.inner.secret_key = secret_key.into();
+        self
+    }
+
+    /// 配置七牛存储空间
+    #[inline]
+    pub fn bucket(mut self, bucket: impl Into<String>) -> Self {
+        self.inner.bucket = bucket.into();
+        self
+    }
+
+    /// 配置 IO 服务器 URL 列表
+    #[inline]
+    pub fn io_urls(mut self, io_urls: Option<Vec<String>>) -> Self {
+        self.inner.io_urls = io_urls;
+        self
+    }
+
+    /// 配置 UC 服务器 URL 列表
     #[inline]
     pub fn uc_urls(mut self, uc_urls: Option<Vec<String>>) -> Self {
         self.inner.uc_urls = uc_urls;
         self
     }
 
-    /// 配置监控服务器域名列表，如果不配置或配置为空，则不会启用打点功能
+    /// 配置监控服务器 URL 列表，如果不配置或配置为空，则不会启用打点功能
     #[inline]
     pub fn monitor_urls(mut self, monitor_urls: Option<Vec<String>>) -> Self {
         self.inner.monitor_urls = monitor_urls;
@@ -422,6 +450,211 @@ impl ConfigBuilder {
     pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: Option<u64>) -> Self {
         self.inner.max_dot_buffer_size = max_dot_buffer_size;
         self
+    }
+}
+
+impl Config {
+    /// 获取七牛 Access Key
+    #[inline]
+    pub fn access_key(&self) -> &str {
+        &self.access_key
+    }
+
+    /// 设置七牛 Access Key
+    #[inline]
+    pub fn set_access_key(&mut self, access_key: impl Into<String>) -> &mut Self {
+        self.access_key = access_key.into();
+        self
+    }
+
+    /// 获取七牛 Secret Key
+    #[inline]
+    pub fn secret_key(&self) -> &str {
+        &self.secret_key
+    }
+
+    /// 设置七牛 Secret Key
+    #[inline]
+    pub fn set_secret_key(&mut self, secret_key: impl Into<String>) -> &mut Self {
+        self.secret_key = secret_key.into();
+        self
+    }
+
+    /// 获取七牛存储空间
+    #[inline]
+    pub fn bucket(&self) -> &str {
+        &self.bucket
+    }
+
+    /// 设置七牛存储空间
+    #[inline]
+    pub fn set_bucket(&mut self, bucket: impl Into<String>) -> &mut Self {
+        self.bucket = bucket.into();
+        self
+    }
+
+    /// 获取 IO 服务器 URL 列表
+    #[inline]
+    pub fn io_urls(&self) -> Option<&[String]> {
+        self.io_urls.as_ref().map(|urls| urls.as_ref())
+    }
+
+    /// 设置 IO 服务器 URL 列表
+    #[inline]
+    pub fn set_io_urls(&mut self, io_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
+        self.io_urls = io_urls.map(|urls| urls.into());
+        self
+    }
+
+    /// 获取 UC 服务器 URL 列表
+    #[inline]
+    pub fn uc_urls(&self) -> Option<&[String]> {
+        self.uc_urls.as_ref().map(|urls| urls.as_ref())
+    }
+
+    /// 设置 UC 服务器 URL 列表
+    #[inline]
+    pub fn set_uc_urls(&mut self, uc_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
+        self.uc_urls = uc_urls.map(|urls| urls.into());
+        self
+    }
+
+    /// 获取监控服务器服务器 URL 列表
+    #[inline]
+    pub fn monitor_urls(&self) -> Option<&[String]> {
+        self.monitor_urls.as_ref().map(|urls| urls.as_ref())
+    }
+
+    /// 设置监控服务器 URL 列表
+    #[inline]
+    pub fn set_monitor_urls(&mut self, monitor_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
+        self.monitor_urls = monitor_urls.map(|urls| urls.into());
+        self
+    }
+
+    /// 是否使用 Getfile API
+    #[inline]
+    pub fn use_getfile_api(&self) -> Option<bool> {
+        self.sim.map(|b| !b)
+    }
+
+    /// 设置是否使用 Getfile API
+    #[inline]
+    pub fn set_use_getfile_api(&mut self, use_getfile_api: Option<bool>) -> &mut Self {
+        self.sim = use_getfile_api.map(|b| !b);
+        self
+    }
+
+    /// 是否对 key 进行格式化
+    #[inline]
+    pub fn normalize_key(&self) -> Option<bool> {
+        self.normalize_key
+    }
+
+    /// 设置是否对 key 进行格式化
+    #[inline]
+    pub fn set_normalize_key(&mut self, normalize_key: Option<bool>) -> &mut Self {
+        self.normalize_key = normalize_key;
+        self
+    }
+
+    /// 是否使用私有存储空间
+    #[inline]
+    pub fn private(&self) -> Option<bool> {
+        self.private
+    }
+
+    /// 设置是否使用私有存储空间
+    #[inline]
+    pub fn set_private(&mut self, private: Option<bool>) -> &mut Self {
+        self.private = private;
+        self
+    }
+
+    /// 获取 IO 和 UC 服务器访问重试次数
+    #[inline]
+    pub fn retry(&self) -> Option<usize> {
+        self.retry
+    }
+
+    /// 设置 IO 和 UC 服务器访问重试次数
+    #[inline]
+    pub fn set_retry(&mut self, retry: Option<usize>) -> &mut Self {
+        self.retry = retry;
+        self
+    }
+
+    /// 获取打点记录上传频率
+    #[inline]
+    pub fn dot_interval(&self) -> Option<Duration> {
+        self.dot_interval_s.map(Duration::from_secs)
+    }
+
+    /// 设置打点记录上传频率
+    #[inline]
+    pub fn set_dot_interval(&mut self, dot_interval: Option<Duration>) -> &mut Self {
+        self.dot_interval_s = dot_interval.map(|d| d.as_secs());
+        self
+    }
+
+    /// 获取打点记录本地缓存文件尺寸上限
+    #[inline]
+    pub fn max_dot_buffer_size(&self) -> Option<u64> {
+        self.max_dot_buffer_size
+    }
+
+    /// 设置打点记录本地缓存文件尺寸上限
+    #[inline]
+    pub fn set_max_dot_buffer_size(&mut self, max_dot_buffer_size: Option<u64>) -> &mut Self {
+        self.max_dot_buffer_size = max_dot_buffer_size;
+        self
+    }
+
+    /// 获取域名访问失败后的惩罚时长
+    #[inline]
+    pub fn punish_time(&self) -> Option<Duration> {
+        self.punish_time_s.map(Duration::from_secs)
+    }
+
+    /// 设置域名访问失败后的惩罚时长
+    #[inline]
+    pub fn set_punish_time(&mut self, punish_time: Option<Duration>) -> &mut Self {
+        self.punish_time_s = punish_time.map(|d| d.as_secs());
+        self
+    }
+
+    /// 获取域名访问的基础超时时长
+    #[inline]
+    pub fn base_timeout(&self) -> Option<Duration> {
+        self.base_timeout_ms.map(Duration::from_millis)
+    }
+
+    /// 设置域名访问失败后的惩罚时长
+    #[inline]
+    pub fn set_base_timeout(&mut self, base_timeout: Option<Duration>) -> &mut Self {
+        self.base_timeout_ms = base_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
+
+    /// 获取域名连接的超时时长
+    #[inline]
+    pub fn connect_timeout(&self) -> Option<Duration> {
+        self.dial_timeout_ms.map(Duration::from_millis)
+    }
+
+    /// 设置域名连接的超时时长
+    #[inline]
+    pub fn set_connect_timeout(&mut self, connect_timeout: Option<Duration>) -> &mut Self {
+        self.dial_timeout_ms =
+            connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
+}
+
+impl From<Config> for ConfigBuilder {
+    #[inline]
+    fn from(config: Config) -> Self {
+        ConfigBuilder { inner: config }
     }
 }
 

@@ -7,6 +7,7 @@
 //! 负责下载完整或部分七牛对象
 
 use directories::BaseDirs;
+use log::warn;
 use once_cell::sync::Lazy;
 use std::{
     env::temp_dir,
@@ -14,6 +15,7 @@ use std::{
     io::Result as IOResult,
     path::{Path, PathBuf},
 };
+use tap::TapFallible;
 
 mod base;
 mod config;
@@ -37,15 +39,21 @@ pub use download::{
 pub use req_id::{set_download_start_time, total_download_duration};
 
 fn cache_dir_path_of(path: impl AsRef<Path>) -> IOResult<PathBuf> {
-    static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
-        BaseDirs::new()
-            .map(|dir| dir.cache_dir().join("qiniu-download"))
-            .unwrap_or_else(|| temp_dir().join("qiniu-download"))
-    });
+    return _cache_dir_path_of(path.as_ref())
+        .tap_err(|err| warn!("Failed to get cache directory: {}", err));
 
-    if !CACHE_DIR.exists() {
-        create_dir_all(&*CACHE_DIR)?;
+    #[inline]
+    fn _cache_dir_path_of(path: &Path) -> IOResult<PathBuf> {
+        static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
+            BaseDirs::new()
+                .map(|dir| dir.cache_dir().join("qiniu-download"))
+                .unwrap_or_else(|| temp_dir().join("qiniu-download"))
+        });
+
+        if !CACHE_DIR.exists() {
+            create_dir_all(&*CACHE_DIR)?;
+        }
+
+        Ok(CACHE_DIR.join(path))
     }
-
-    Ok(CACHE_DIR.join(path.as_ref()))
 }
