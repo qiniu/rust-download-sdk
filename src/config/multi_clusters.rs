@@ -176,7 +176,7 @@ fn default_select_config<'a>(
 ) -> Option<&'a Config> {
     configs
         .iter()
-        .find(|(name, _)| key.starts_with(name.as_str()))
+        .find(|(name, _)| Path::new(key).starts_with(Path::new(name.as_str())))
         .map(|(_, config)| config)
 }
 

@@ -262,6 +262,7 @@ mod tests {
     use anyhow::Result;
     use std::{
         collections::HashMap,
+        ffi::OsStr,
         fs::{remove_file, rename, OpenOptions},
         io::Write,
         path::PathBuf,
@@ -288,9 +289,9 @@ mod tests {
             let mut tempfile = TempFileBuilder::new().suffix(".toml").tempfile()?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
-            env::set_var(QINIU_ENV, tempfile.path().as_os_str());
             tempfile.into_temp_path()
         };
+        let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
         *config.original_path_mut() = Some(tempfile_path.to_path_buf());
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
@@ -475,6 +476,7 @@ mod tests {
             env::set_var(QINIU_MULTI_ENV, tempfile.path().as_os_str());
             tempfile.into_temp_path()
         };
+        let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
 
@@ -715,23 +717,6 @@ mod tests {
         env_logger::try_init().ok();
         let _defer = ResetFinally;
 
-        struct QiniuHotReloadingEnvGuard;
-
-        impl QiniuHotReloadingEnvGuard {
-            #[inline]
-            fn new() -> Self {
-                env::set_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV, "1");
-                Self
-            }
-        }
-
-        impl Drop for QiniuHotReloadingEnvGuard {
-            #[inline]
-            fn drop(&mut self) {
-                env::remove_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV)
-            }
-        }
-
         let _guard = QiniuHotReloadingEnvGuard::new();
 
         let mut config = ConfigBuilder::new(
@@ -745,9 +730,9 @@ mod tests {
             let mut tempfile = TempFileBuilder::new().suffix(".toml").tempfile()?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
-            env::set_var(QINIU_ENV, tempfile.path().as_os_str());
             tempfile.into_temp_path()
         };
+        let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
         *config.original_path_mut() = Some(tempfile_path.to_path_buf());
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
@@ -787,6 +772,73 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn test_default_select_callback_of_multi_clusters_config() -> Result<()> {
+        env_logger::try_init().ok();
+        let _defer = ResetFinally;
+
+        let tempfile_path_1 = {
+            let config = ConfigBuilder::new(
+                "test-ak-1",
+                "test-sk-1",
+                "test-bucket-1",
+                Some(vec!["http://io-11.com".into(), "http://io-12.com".into()]),
+            )
+            .build();
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("1-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let tempfile_path_2 = {
+            let config = ConfigBuilder::new(
+                "test-ak-2",
+                "test-sk-2",
+                "test-bucket-2",
+                Some(vec!["http://io-21.com".into(), "http://io-22.com".into()]),
+            )
+            .build();
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("2-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let tempfile_path = {
+            let mut config = HashMap::with_capacity(2);
+            config.insert("/node1", tempfile_path_1.to_path_buf());
+            config.insert("/node12", tempfile_path_2.to_path_buf());
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("all-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
+
+        let mut config = qiniu_config().write().unwrap();
+        let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
+        assert!(multi_config
+            .with_key("/node1", |config| {
+                assert_eq!(config.access_key(), "test-ak-1");
+            })
+            .is_some());
+        assert!(multi_config
+            .with_key("/node12", |config| {
+                assert_eq!(config.access_key(), "test-ak-2");
+            })
+            .is_some());
+
+        Ok(())
+    }
+
     struct ResetFinally;
 
     impl Drop for ResetFinally {
@@ -795,6 +847,57 @@ mod tests {
             reset_static_vars();
             CONFIG_UPDATE_HANDLERS.write().unwrap().clear();
             unwatch_all().unwrap();
+        }
+    }
+
+    struct QiniuHotReloadingEnvGuard;
+
+    impl QiniuHotReloadingEnvGuard {
+        #[inline]
+        fn new() -> Self {
+            env::set_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV, "1");
+            Self
+        }
+    }
+
+    impl Drop for QiniuHotReloadingEnvGuard {
+        #[inline]
+        fn drop(&mut self) {
+            env::remove_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV)
+        }
+    }
+
+    struct QiniuEnvGuard;
+
+    impl QiniuEnvGuard {
+        #[inline]
+        fn new(val: &OsStr) -> Self {
+            env::set_var(QINIU_ENV, val);
+            Self
+        }
+    }
+
+    impl Drop for QiniuEnvGuard {
+        #[inline]
+        fn drop(&mut self) {
+            env::remove_var(QINIU_ENV)
+        }
+    }
+
+    struct QiniuMultiEnvGuard;
+
+    impl QiniuMultiEnvGuard {
+        #[inline]
+        fn new(val: &OsStr) -> Self {
+            env::set_var(QINIU_MULTI_ENV, val);
+            Self
+        }
+    }
+
+    impl Drop for QiniuMultiEnvGuard {
+        #[inline]
+        fn drop(&mut self) {
+            env::remove_var(QINIU_MULTI_ENV)
         }
     }
 }
