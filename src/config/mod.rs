@@ -8,6 +8,7 @@ pub use configurable::Configurable;
 pub use multi_clusters::{
     MultipleClustersConfig, MultipleClustersConfigBuilder, MultipleClustersConfigParseError,
 };
+use once_cell::sync::Lazy;
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
 pub(crate) use static_vars::*;
@@ -151,7 +152,7 @@ fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
         *current = Some(config);
         info!("QINIU_CONFIG reloaded: {:?}", *current);
     }
-    for handle in config_update_handlers().read().unwrap().iter() {
+    for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
         handle();
     }
 }
@@ -169,8 +170,11 @@ pub enum ClustersConfigParseError {
     TOMLError(#[from] toml::de::Error),
 }
 
+type ConfigUpdateHandlers = Vec<fn()>;
+static CONFIG_UPDATE_HANDLERS: Lazy<RwLock<ConfigUpdateHandlers>> = Lazy::new(Default::default);
+
 pub(super) fn on_config_updated(handle: fn()) {
-    config_update_handlers().write().unwrap().push(handle);
+    CONFIG_UPDATE_HANDLERS.write().unwrap().push(handle);
 }
 
 pub(super) fn build_range_reader_builder_from_config(
@@ -268,7 +272,7 @@ mod tests {
     #[test]
     fn test_load_config() -> Result<()> {
         env_logger::try_init().ok();
-        reset_static_vars();
+        reset();
 
         let mut config = ConfigBuilder::new(
             "test-ak-1",
@@ -382,7 +386,7 @@ mod tests {
     #[test]
     fn test_set_config() {
         env_logger::try_init().ok();
-        reset_static_vars();
+        reset();
 
         let mut config = ConfigBuilder::new(
             "test-ak-1",
@@ -419,7 +423,7 @@ mod tests {
     #[test]
     fn test_load_multi_clusters_config() -> Result<()> {
         env_logger::try_init().ok();
-        reset_static_vars();
+        reset();
 
         let tempfile_path_1 = {
             let config = ConfigBuilder::new(
@@ -683,7 +687,7 @@ mod tests {
     #[test]
     fn test_load_config_without_hot_reloading() -> Result<()> {
         env_logger::try_init().ok();
-        reset_static_vars();
+        reset();
 
         struct QiniuHotReloadingEnvGuard;
 
@@ -755,5 +759,10 @@ mod tests {
         assert_eq!(UPDATED.load(Relaxed), 0);
 
         Ok(())
+    }
+
+    fn reset() {
+        reset_static_vars();
+        CONFIG_UPDATE_HANDLERS.write().unwrap().clear();
     }
 }

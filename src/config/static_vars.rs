@@ -21,13 +21,6 @@ mod safe {
     pub(crate) fn http_client() -> &'static RwLock<HTTPClient> {
         HTTP_CLIENT.get_or_init(build_http_client)
     }
-
-    type ConfigUpdateHandlers = Vec<fn()>;
-    static CONFIG_UPDATE_HANDLERS: OnceCell<RwLock<ConfigUpdateHandlers>> = OnceCell::new();
-
-    pub(in super::super) fn config_update_handlers() -> &'static RwLock<ConfigUpdateHandlers> {
-        CONFIG_UPDATE_HANDLERS.get_or_init(Default::default)
-    }
 }
 
 #[cfg(not(test))]
@@ -52,17 +45,9 @@ mod not_safe {
         unsafe { &mut HTTP_CLIENT }.get_or_init(build_http_client)
     }
 
-    type ConfigUpdateHandlers = Vec<fn()>;
-    static mut CONFIG_UPDATE_HANDLERS: OnceCell<RwLock<ConfigUpdateHandlers>> = OnceCell::new();
-
-    pub(in super::super) fn config_update_handlers() -> &'static RwLock<ConfigUpdateHandlers> {
-        unsafe { &mut CONFIG_UPDATE_HANDLERS }.get_or_init(Default::default)
-    }
-
     pub(in super::super) fn reset_static_vars() {
         unsafe { &mut QINIU_CONFIG }.take();
         unsafe { &mut HTTP_CLIENT }.take();
-        unsafe { &mut CONFIG_UPDATE_HANDLERS }.take();
         unwatch_all().unwrap();
     }
 }
