@@ -34,18 +34,20 @@ fn build_http_client() -> RwLock<HTTPClient> {
     fn _build_http_client() -> HTTPClient {
         let mut base_timeout = Duration::from_millis(3000u64);
         let mut dial_timeout = Duration::from_millis(50u64);
-        if let Some(config) = qiniu_config().read().unwrap().as_ref() {
-            if let Some(value) = config.base_timeout() {
-                if value > Duration::from_millis(0) {
-                    base_timeout = value;
+        with_current_qiniu_config(|config| {
+            if let Some(config) = config {
+                if let Some(value) = config.base_timeout() {
+                    if value > Duration::from_millis(0) {
+                        base_timeout = value;
+                    }
+                }
+                if let Some(value) = config.connect_timeout() {
+                    if value > Duration::from_millis(0) {
+                        dial_timeout = value;
+                    }
                 }
             }
-            if let Some(value) = config.connect_timeout() {
-                if value > Duration::from_millis(0) {
-                    dial_timeout = value;
-                }
-            }
-        }
+        });
         let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
         HTTPClient::builder()
             .user_agent(user_agent)
@@ -63,7 +65,28 @@ fn build_http_client() -> RwLock<HTTPClient> {
 /// 如果当前没有设置 QINIU 环境变量，或加载该环境变量出现错误，则返回 false
 #[inline]
 pub fn is_qiniu_enabled() -> bool {
-    qiniu_config().read().unwrap().is_some()
+    with_current_qiniu_config(|config| config.is_some())
+}
+
+/// 在回调函数内获取只读的当前七牛环境配置
+///
+/// 需要注意的是，在回调函数内，当前七牛环境配置会被用读锁保护，因此回调函数应该尽快返回
+#[inline]
+pub fn with_current_qiniu_config<T>(f: impl FnOnce(Option<&Configurable>) -> T) -> T {
+    f(qiniu_config().read().unwrap().as_ref())
+}
+
+/// 在回调函数内获取可写的当前七牛环境配置
+///
+/// 需要注意的是，在回调函数内，当前七牛环境配置会被用写锁保护，因此回调函数应该尽快返回
+#[inline]
+pub fn with_current_qiniu_config_mut<T>(f: impl FnOnce(Option<&mut Configurable>) -> T) -> T {
+    f(qiniu_config().write().unwrap().as_mut())
+}
+
+#[inline]
+fn with_current_qiniu_config_mut_inner<T>(f: impl FnOnce(&mut Option<Configurable>) -> T) -> T {
+    f(&mut qiniu_config().write().unwrap())
 }
 
 /// 手动设置单集群七牛环境配置
@@ -138,8 +161,7 @@ fn reload_config(migrate_callback: bool) {
 
 #[inline]
 fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
-    {
-        let mut current = qiniu_config().write().unwrap();
+    with_current_qiniu_config_mut_inner(|current| {
         if migrate_callback {
             if let (Some(current), Some(new)) = (
                 current.as_mut().and_then(|current| current.as_multi_mut()),
@@ -149,9 +171,9 @@ fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
             }
         }
         ensure_watches(&config.config_paths()).ok();
+        info!("QINIU_CONFIG reloaded: {:?}", config);
         *current = Some(config);
-        info!("QINIU_CONFIG reloaded: {:?}", *current);
-    }
+    });
     for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
         handle();
     }
@@ -248,17 +270,25 @@ pub(super) fn build_range_reader_builder_from_config(
     builder
 }
 
-pub(super) fn build_range_reader_builder_from_env(key: String) -> Option<RangeReaderBuilder> {
-    qiniu_config().read().unwrap().as_ref().and_then(|config| {
-        config.with_key(&key.to_owned(), move |config| {
-            build_range_reader_builder_from_config(key, config)
+pub(super) fn build_range_reader_builder_from_env(
+    key: String,
+    only_single_cluster: bool,
+) -> Option<RangeReaderBuilder> {
+    with_current_qiniu_config(|config| {
+        config.and_then(|config| {
+            if only_single_cluster && config.as_single().is_some() {
+                return None;
+            }
+            config.with_key(&key.to_owned(), move |config| {
+                build_range_reader_builder_from_config(key, config)
+            })
         })
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{watcher::unwatch_all, *};
+    use super::{super::download::RangeReader, watcher::unwatch_all, *};
     use anyhow::Result;
     use std::{
         collections::HashMap,
@@ -292,7 +322,6 @@ mod tests {
             tempfile.into_temp_path()
         };
         let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
-        *config.original_path_mut() = Some(tempfile_path.to_path_buf());
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
 
@@ -484,9 +513,8 @@ mod tests {
             UPDATED.fetch_add(1, Relaxed);
         });
 
-        {
-            let mut config = qiniu_config().write().unwrap();
-            let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
+        with_current_qiniu_config_mut(|config| {
+            let multi_config = config.unwrap().as_multi_mut().unwrap();
             assert!(multi_config
                 .with_key("config_1", |config| {
                     assert_eq!(config.access_key(), "test-ak-1");
@@ -523,7 +551,7 @@ mod tests {
                     assert_eq!(config.access_key(), "test-ak-3");
                 })
                 .is_none());
-        }
+        });
 
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 0);
@@ -542,9 +570,8 @@ mod tests {
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 1);
 
-        {
-            let mut config = qiniu_config().write().unwrap();
-            let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
+        with_current_qiniu_config_mut(|config| {
+            let multi_config = config.unwrap().as_multi_mut().unwrap();
             assert!(multi_config
                 .with_key("config_1", |config| {
                     assert_eq!(config.access_key(), "test-ak-22");
@@ -560,7 +587,7 @@ mod tests {
                     assert_eq!(config.access_key(), "test-ak-3");
                 })
                 .is_none());
-        }
+        });
 
         let tempfile_path_3 = {
             let config = ConfigBuilder::new(
@@ -624,9 +651,8 @@ mod tests {
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 3);
 
-        {
-            let mut config = qiniu_config().write().unwrap();
-            let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
+        with_current_qiniu_config_mut(|config| {
+            let multi_config = config.unwrap().as_multi_mut().unwrap();
             assert!(multi_config
                 .with_key("config_1", |config| {
                     assert_eq!(config.access_key(), "test-ak-22");
@@ -642,7 +668,7 @@ mod tests {
                     assert_eq!(config.access_key(), "test-ak-32");
                 })
                 .is_some());
-        }
+        });
 
         assert_eq!(watch_dirs_count(), 2);
         assert_eq!(watch_files_count(), 4);
@@ -652,14 +678,13 @@ mod tests {
             config.insert("config_2", tempfile_path_2.to_path_buf());
             config.insert("config_3", tempfile_path_3.to_path_buf());
             fs::write(&tempfile_path, &toml::to_vec(&config)?)?;
-        };
+        }
 
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 4);
 
-        {
-            let mut config = qiniu_config().write().unwrap();
-            let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
+        with_current_qiniu_config_mut(|config| {
+            let multi_config = config.unwrap().as_multi_mut().unwrap();
             assert!(multi_config
                 .with_key("config_1", |config| {
                     assert_eq!(config.access_key(), "test-ak-22");
@@ -675,7 +700,7 @@ mod tests {
                     assert_eq!(config.access_key(), "test-ak-32");
                 })
                 .is_some());
-        }
+        });
 
         {
             let config = ConfigBuilder::new(
@@ -733,7 +758,6 @@ mod tests {
             tempfile.into_temp_path()
         };
         let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
-        *config.original_path_mut() = Some(tempfile_path.to_path_buf());
 
         static UPDATED: AtomicUsize = AtomicUsize::new(0);
         UPDATED.store(0, Relaxed);
@@ -823,18 +847,125 @@ mod tests {
         };
         let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
 
-        let mut config = qiniu_config().write().unwrap();
-        let multi_config = config.as_mut().unwrap().as_multi_mut().unwrap();
-        assert!(multi_config
-            .with_key("/node1", |config| {
-                assert_eq!(config.access_key(), "test-ak-1");
-            })
-            .is_some());
-        assert!(multi_config
-            .with_key("/node12", |config| {
-                assert_eq!(config.access_key(), "test-ak-2");
-            })
-            .is_some());
+        with_current_qiniu_config_mut(|config| {
+            let multi_config = config.unwrap().as_multi_mut().unwrap();
+            assert!(multi_config
+                .with_key("/node1", |config| {
+                    assert_eq!(config.access_key(), "test-ak-1");
+                })
+                .is_some());
+            assert!(multi_config
+                .with_key("/node12", |config| {
+                    assert_eq!(config.access_key(), "test-ak-2");
+                })
+                .is_some());
+        });
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_range_reader_from_multi_clusters_config() -> Result<()> {
+        env_logger::try_init().ok();
+        let _defer = ResetFinally;
+
+        let tempfile_path_1 = {
+            let config = ConfigBuilder::new(
+                "test-ak-1",
+                "test-sk-1",
+                "test-bucket-1",
+                Some(vec!["http://io-11.com".into(), "http://io-12.com".into()]),
+            )
+            .build();
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("1-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let tempfile_path_2 = {
+            let config = ConfigBuilder::new(
+                "test-ak-2",
+                "test-sk-2",
+                "test-bucket-2",
+                Some(vec!["http://io-21.com".into(), "http://io-22.com".into()]),
+            )
+            .build();
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("2-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let tempfile_path = {
+            let mut config = HashMap::with_capacity(2);
+            config.insert("/node1", tempfile_path_1.to_path_buf());
+            config.insert("/node2", tempfile_path_2.to_path_buf());
+            let mut tempfile = TempFileBuilder::new()
+                .prefix("all-")
+                .suffix(".toml")
+                .tempfile()?;
+            tempfile.write_all(&toml::to_vec(&config)?)?;
+            tempfile.flush()?;
+            tempfile.into_temp_path()
+        };
+        let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
+
+        assert_eq!(
+            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
+        );
+        assert_eq!(
+            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
+            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+        );
+        assert!(RangeReader::from_env("/node3/file1").is_none());
+
+        {
+            let config = ConfigBuilder::new(
+                "test-ak-1",
+                "test-sk-1",
+                "test-bucket-1",
+                Some(vec!["http://io-112.com".into(), "http://io-122.com".into()]),
+            )
+            .build();
+            fs::write(&tempfile_path_1, &toml::to_vec(&config)?)?;
+        }
+
+        sleep(Duration::from_secs(1));
+
+        assert_eq!(
+            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            vec![
+                "http://io-112.com".to_owned(),
+                "http://io-122.com".to_owned()
+            ]
+        );
+        assert_eq!(
+            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
+            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+        );
+
+        {
+            let mut config = HashMap::with_capacity(2);
+            config.insert("/node1", tempfile_path_1.to_path_buf());
+            fs::write(&tempfile_path, &toml::to_vec(&config)?)?;
+        }
+
+        sleep(Duration::from_secs(1));
+
+        assert_eq!(
+            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            vec![
+                "http://io-112.com".to_owned(),
+                "http://io-122.com".to_owned()
+            ]
+        );
+        assert!(RangeReader::from_env("/node2/file1").is_none());
 
         Ok(())
     }

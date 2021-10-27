@@ -2,7 +2,7 @@ use super::{
     base::credential::Credential,
     config::{
         build_range_reader_builder_from_config, build_range_reader_builder_from_env, http_client,
-        on_config_updated, Config,
+        with_current_qiniu_config, Config,
     },
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
@@ -11,7 +11,6 @@ use super::{
 };
 use log::{debug, error, info, warn};
 use multipart::server::Multipart;
-use once_cell::sync::Lazy;
 use positioned_io::ReadAt;
 use reqwest::{
     blocking::{RequestBuilder as HTTPRequestBuilder, Response as HTTPResponse},
@@ -24,7 +23,7 @@ use std::{
         Result as IOResult, Seek, SeekFrom, Write,
     },
     result::Result,
-    sync::{Arc, RwLock},
+    sync::Arc,
     thread::sleep,
     time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
@@ -82,7 +81,7 @@ pub struct RangeReader {
 }
 
 #[derive(Debug)]
-struct RangeReaderInner {
+pub(super) struct RangeReaderInner {
     io_selector: HostSelector,
     dotter: Dotter,
     credential: Credential,
@@ -364,7 +363,7 @@ impl RangeReaderBuilder {
     /// * `key` - 对象名称
     #[inline]
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
-        build_range_reader_builder_from_env(key.into())
+        build_range_reader_builder_from_env(key.into(), false)
     }
 }
 
@@ -396,29 +395,19 @@ impl RangeReader {
     /// * `key` - 对象名称
     #[inline]
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
-        static RANGE_READER_INNER: Lazy<RwLock<Option<Arc<RangeReaderInner>>>> = Lazy::new(|| {
-            RwLock::new(build_range_reader_inner().tap(|_| {
-                on_config_updated(|| {
-                    *RANGE_READER_INNER.write().unwrap() = build_range_reader_inner();
-                    info!("RANGE_READER_INNER reloaded: {:?}", RANGE_READER_INNER);
+        let key = key.into();
+        with_current_qiniu_config(|config| {
+            config.and_then(|config| {
+                config.with_key(&key.to_owned(), |config| {
+                    config.get_or_init_range_reader_inner(|| {
+                        RangeReaderBuilder::from_config(String::new(), config)
+                            .build_inner_and_key()
+                            .0
+                    })
                 })
-            }))
-        });
-        return RANGE_READER_INNER
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|inner| Self {
-                inner: inner.to_owned(),
-                key: key.into(),
-            });
-
-        #[inline]
-        fn build_range_reader_inner() -> Option<Arc<RangeReaderInner>> {
-            RangeReaderBuilder::from_env(String::new())
-                .map(|b| b.build_inner_and_key())
-                .map(|v| v.0)
-        }
+            })
+        })
+        .map(|inner| Self { inner, key })
     }
 
     /// 主动更新域名列表

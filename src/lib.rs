@@ -28,9 +28,10 @@ mod req_id;
 pub use base::credential::Credential;
 pub use config::{
     is_qiniu_enabled, set_qiniu_config, set_qiniu_multi_clusters_config,
-    set_qiniu_single_cluster_config, ClustersConfigParseError, Config, ConfigBuilder, Configurable,
-    MultipleClustersConfig, MultipleClustersConfigBuilder, MultipleClustersConfigParseError,
-    SingleClusterConfig, SingleClusterConfigBuilder,
+    set_qiniu_single_cluster_config, with_current_qiniu_config, with_current_qiniu_config_mut,
+    ClustersConfigParseError, Config, ConfigBuilder, Configurable, MultipleClustersConfig,
+    MultipleClustersConfigBuilder, MultipleClustersConfigParseError, SingleClusterConfig,
+    SingleClusterConfigBuilder,
 };
 pub use dot::{
     disable_dot_uploading, disable_dotting, enable_dot_uploading, enable_dotting,

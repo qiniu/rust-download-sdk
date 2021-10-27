@@ -1,8 +1,10 @@
-use super::ClustersConfigParseError;
+use super::{super::download::RangeReaderInner, ClustersConfigParseError};
+use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{
     convert::TryInto,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use tap::TapFallible;
@@ -37,7 +39,7 @@ pub struct Config {
     dial_timeout_ms: Option<u64>,
 
     #[serde(skip)]
-    original_path: Option<PathBuf>,
+    extra: Extra,
 }
 
 /// 单集群七牛配置信息
@@ -67,7 +69,7 @@ impl Config {
             _ => panic!("QINIU env can only support to be given .toml or .json file"),
         }
         .tap_ok_mut(|config: &mut Self| {
-            config.original_path = Some(path.to_owned());
+            config.extra.original_path = Some(path.to_owned());
         })
     }
 
@@ -270,21 +272,30 @@ impl Config {
     #[inline]
     #[allow(dead_code)]
     pub(super) fn original_path(&self) -> Option<&Path> {
-        self.original_path.as_ref().map(|p| p.as_ref())
+        self.extra.original_path.as_ref().map(|p| p.as_ref())
     }
 
     #[inline]
     #[allow(dead_code)]
     pub(super) fn original_path_mut(&mut self) -> &mut Option<PathBuf> {
-        &mut self.original_path
+        &mut self.extra.original_path
     }
 
     #[inline]
     pub(super) fn config_paths(&self) -> Vec<PathBuf> {
-        self.original_path
+        self.extra
+            .original_path
             .as_ref()
             .map(|path| vec![path.to_owned()])
             .unwrap_or_default()
+    }
+
+    #[inline]
+    pub(crate) fn get_or_init_range_reader_inner(
+        &self,
+        f: impl FnOnce() -> Arc<RangeReaderInner>,
+    ) -> Arc<RangeReaderInner> {
+        self.extra.range_reader_inner.get_or_init(f).to_owned()
     }
 }
 
@@ -431,3 +442,18 @@ impl From<Config> for ConfigBuilder {
         ConfigBuilder(config)
     }
 }
+
+#[derive(Default, Clone, Debug)]
+struct Extra {
+    original_path: Option<PathBuf>,
+    range_reader_inner: OnceCell<Arc<RangeReaderInner>>,
+}
+
+impl PartialEq for Extra {
+    #[inline]
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Extra {}
