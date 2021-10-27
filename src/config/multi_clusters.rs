@@ -3,7 +3,7 @@ use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::{
     collections::HashMap,
-    convert::{TryFrom, TryInto},
+    convert::TryFrom,
     fmt, fs,
     io::Error as IOError,
     mem::swap,
@@ -28,8 +28,6 @@ pub struct MultipleClustersConfig {
     configs: HashMap<String, Config>,
     original_path: Option<PathBuf>,
     original_paths: HashMap<String, PathBuf>,
-    base_timeout_ms: Option<u64>,
-    dial_timeout_ms: Option<u64>,
     select_config: SelectConfigFn,
 }
 
@@ -82,12 +80,18 @@ impl MultipleClustersConfig {
 
     #[inline]
     pub(super) fn base_timeout(&self) -> Option<Duration> {
-        self.base_timeout_ms.map(Duration::from_millis)
+        self.configs
+            .iter()
+            .filter_map(|(_, config)| config.base_timeout())
+            .max()
     }
 
     #[inline]
     pub(super) fn connect_timeout(&self) -> Option<Duration> {
-        self.dial_timeout_ms.map(Duration::from_millis)
+        self.configs
+            .iter()
+            .filter_map(|(_, config)| config.connect_timeout())
+            .max()
     }
 
     #[inline]
@@ -122,8 +126,6 @@ impl TryFrom<HashMap<String, PathBuf>> for MultipleClustersConfig {
                 })
                 .collect::<Result<_, _>>()?,
             original_path: None,
-            base_timeout_ms: None,
-            dial_timeout_ms: None,
             select_config: DEFAULT_CONFIG_SELECT_CALLBACK.to_owned(),
         })
     }
@@ -150,8 +152,6 @@ impl Default for MultipleClustersConfig {
             original_path: None,
             original_paths: Default::default(),
             select_config: DEFAULT_CONFIG_SELECT_CALLBACK.to_owned(),
-            base_timeout_ms: None,
-            dial_timeout_ms: None,
         }
     }
 }
@@ -163,8 +163,6 @@ impl fmt::Debug for MultipleClustersConfig {
             .field("configs", &self.configs)
             .field("original_path", &self.original_path)
             .field("original_paths", &self.original_paths)
-            .field("base_timeout_ms", &self.base_timeout_ms)
-            .field("dial_timeout_ms", &self.dial_timeout_ms)
             .finish()
     }
 }
@@ -195,21 +193,6 @@ impl MultipleClustersConfigBuilder {
     #[inline]
     pub fn add_cluster(mut self, name: impl Into<String>, config: Config) -> Self {
         self.0.configs.insert(name.into(), config);
-        self
-    }
-
-    /// 配置域名访问的基础超时时长，默认为 3000 毫秒
-    #[inline]
-    pub fn base_timeout(mut self, base_timeout: Option<Duration>) -> Self {
-        self.0.base_timeout_ms = base_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
-        self
-    }
-
-    /// 配置域名连接的超时时长，默认为 50 毫秒
-    #[inline]
-    pub fn connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
-        self.0.dial_timeout_ms =
-            connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
         self
     }
 
