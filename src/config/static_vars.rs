@@ -28,7 +28,7 @@ pub(crate) use safe::*;
 
 #[cfg(test)]
 mod not_safe {
-    use super::{super::watcher::unwatch_all, *};
+    use super::*;
 
     pub(in super::super) static mut QINIU_CONFIG: OnceCell<RwLock<Option<Configurable>>> =
         OnceCell::new();
@@ -48,7 +48,6 @@ mod not_safe {
     pub(in super::super) fn reset_static_vars() {
         unsafe { &mut QINIU_CONFIG }.take();
         unsafe { &mut HTTP_CLIENT }.take();
-        unwatch_all().unwrap();
     }
 }
 #[cfg(test)]

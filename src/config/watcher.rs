@@ -73,7 +73,9 @@ fn remove_from_watcher(path: &Path) -> NotifyResult<()> {
         let watch_dir = parent_of(path);
         if let Some(mut count) = WATCHED_DIRS.get_mut(&watch_dir) {
             *count -= 1;
+            log::warn!("**** remove_from_watcher: {}", *count);
             if *count == 0 {
+                log::warn!("**** remove_from_watcher: removed: {:?}", watch_dir);
                 drop(count);
                 WATCHED_DIRS.remove(&watch_dir);
                 WATCHER.write().unwrap().unwatch(&watch_dir)?;
@@ -89,6 +91,7 @@ pub(super) fn unwatch_all() -> NotifyResult<()> {
     {
         let mut watcher = WATCHER.write().unwrap();
         for watched_dir in WATCHED_DIRS.iter() {
+            log::warn!("**** unwatch: {:?}", watched_dir.key());
             watcher.unwatch(watched_dir.key())?;
         }
     }
@@ -97,6 +100,18 @@ pub(super) fn unwatch_all() -> NotifyResult<()> {
     WATCHED_FILES.clear();
 
     Ok(())
+}
+
+#[inline]
+#[cfg(test)]
+pub(super) fn watch_dirs_count() -> usize {
+    WATCHED_DIRS.len()
+}
+
+#[inline]
+#[cfg(test)]
+pub(super) fn watch_files_count() -> usize {
+    WATCHED_FILES.len()
 }
 
 #[inline]

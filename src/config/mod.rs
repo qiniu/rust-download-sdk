@@ -258,21 +258,23 @@ pub(super) fn build_range_reader_builder_from_env(key: String) -> Option<RangeRe
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{watcher::unwatch_all, *};
     use anyhow::Result;
     use std::{
         collections::HashMap,
         fs::{remove_file, rename, OpenOptions},
         io::Write,
+        path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering::Relaxed},
         thread::sleep,
     };
-    use tempfile::Builder as TempFileBuilder;
+    use tempfile::{tempdir, Builder as TempFileBuilder};
+    use watcher::{watch_dirs_count, watch_files_count};
 
     #[test]
     fn test_load_config() -> Result<()> {
         env_logger::try_init().ok();
-        reset();
+        let _defer = ResetFinally;
 
         let mut config = ConfigBuilder::new(
             "test-ak-1",
@@ -384,9 +386,9 @@ mod tests {
     }
 
     #[test]
-    fn test_set_config() {
+    fn test_set_config() -> Result<()> {
         env_logger::try_init().ok();
-        reset();
+        let _defer = ResetFinally;
 
         let mut config = ConfigBuilder::new(
             "test-ak-1",
@@ -418,12 +420,14 @@ mod tests {
 
         set_qiniu_config(config);
         assert_eq!(UPDATED.load(Relaxed), 6);
+
+        Ok(())
     }
 
     #[test]
     fn test_load_multi_clusters_config() -> Result<()> {
         env_logger::try_init().ok();
-        reset();
+        let _defer = ResetFinally;
 
         let tempfile_path_1 = {
             let config = ConfigBuilder::new(
@@ -457,6 +461,7 @@ mod tests {
             tempfile.flush()?;
             tempfile.into_temp_path()
         };
+        let tempdir = tempdir()?;
         let tempfile_path = {
             let mut config = HashMap::with_capacity(2);
             config.insert("config_1", tempfile_path_1.to_path_buf());
@@ -464,7 +469,7 @@ mod tests {
             let mut tempfile = TempFileBuilder::new()
                 .prefix("all-")
                 .suffix(".toml")
-                .tempfile()?;
+                .tempfile_in(tempdir.path())?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
             env::set_var(QINIU_MULTI_ENV, tempfile.path().as_os_str());
@@ -637,6 +642,9 @@ mod tests {
                 .is_some());
         }
 
+        assert_eq!(watch_dirs_count(), 2);
+        assert_eq!(watch_files_count(), 4);
+
         {
             let mut config = HashMap::with_capacity(2);
             config.insert("config_2", tempfile_path_2.to_path_buf());
@@ -681,13 +689,31 @@ mod tests {
         sleep(Duration::from_secs(1));
         assert_eq!(UPDATED.load(Relaxed), 4);
 
+        assert_eq!(watch_dirs_count(), 2);
+        assert_eq!(watch_files_count(), 3);
+
+        {
+            fs::write(
+                &tempfile_path,
+                &toml::to_vec(&HashMap::<String, PathBuf>::new())?,
+            )?;
+        };
+
+        sleep(Duration::from_secs(1));
+        assert_eq!(UPDATED.load(Relaxed), 5);
+
+        assert_eq!(watch_dirs_count(), 1);
+        assert_eq!(watch_files_count(), 1);
+
+        unwatch_all()?;
+
         Ok(())
     }
 
     #[test]
     fn test_load_config_without_hot_reloading() -> Result<()> {
         env_logger::try_init().ok();
-        reset();
+        let _defer = ResetFinally;
 
         struct QiniuHotReloadingEnvGuard;
 
@@ -761,8 +787,14 @@ mod tests {
         Ok(())
     }
 
-    fn reset() {
-        reset_static_vars();
-        CONFIG_UPDATE_HANDLERS.write().unwrap().clear();
+    struct ResetFinally;
+
+    impl Drop for ResetFinally {
+        #[inline]
+        fn drop(&mut self) {
+            reset_static_vars();
+            CONFIG_UPDATE_HANDLERS.write().unwrap().clear();
+            unwatch_all().unwrap();
+        }
     }
 }
