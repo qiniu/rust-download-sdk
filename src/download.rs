@@ -5,7 +5,7 @@ use super::{
         with_current_qiniu_config, Config, Timeouts,
     },
     dot::{ApiName, DotType, Dotter},
-    host_selector::HostSelector,
+    host_selector::{HostSelector, HostSelectorBuilder},
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
 };
@@ -107,17 +107,17 @@ pub struct RangeReaderBuilder {
     monitor_urls: Vec<String>,
     io_tries: usize,
     uc_tries: usize,
-    dot_tries: usize,
-    update_interval: Duration,
-    punish_duration: Duration,
-    base_timeout: Duration,
-    dial_timeout: Duration,
-    max_punished_times: usize,
-    max_punished_hosts_percent: u8,
+    update_interval: Option<Duration>,
+    punish_duration: Option<Duration>,
+    base_timeout: Option<Duration>,
+    dial_timeout: Option<Duration>,
+    max_punished_times: Option<usize>,
+    max_punished_hosts_percent: Option<u8>,
     use_getfile_api: bool,
     normalize_key: bool,
     private_url_lifetime: Option<Duration>,
     use_https: bool,
+    dot_tries: Option<usize>,
     dot_interval: Option<Duration>,
     max_dot_buffer_size: Option<u64>,
 }
@@ -146,17 +146,17 @@ impl RangeReaderBuilder {
             monitor_urls: vec![],
             io_tries: 10,
             uc_tries: 10,
-            dot_tries: 10,
-            update_interval: Duration::from_secs(60),
-            punish_duration: Duration::from_secs(30 * 60),
-            base_timeout: Duration::from_secs(3),
-            dial_timeout: Duration::from_millis(50),
-            max_punished_times: 5,
-            max_punished_hosts_percent: 50,
+            update_interval: None,
+            punish_duration: None,
+            base_timeout: None,
+            dial_timeout: None,
+            max_punished_times: None,
+            max_punished_hosts_percent: None,
             use_getfile_api: true,
             normalize_key: false,
             private_url_lifetime: None,
             use_https: false,
+            dot_tries: None,
             dot_interval: None,
             max_dot_buffer_size: None,
         }
@@ -193,35 +193,35 @@ impl RangeReaderBuilder {
     /// 设置打点记录上传的最大尝试次数
     #[inline]
     pub fn dot_tries(mut self, tries: usize) -> Self {
-        self.dot_tries = tries;
+        self.dot_tries = Some(tries);
         self
     }
 
     /// 设置 UC 查询的频率
     #[inline]
     pub fn update_interval(mut self, interval: Duration) -> Self {
-        self.update_interval = interval;
+        self.update_interval = Some(interval);
         self
     }
 
     /// 设置域名访问失败后的惩罚时长
     #[inline]
     pub fn punish_duration(mut self, duration: Duration) -> Self {
-        self.punish_duration = duration;
+        self.punish_duration = Some(duration);
         self
     }
 
     /// 设置域名访问的基础超时时长
     #[inline]
     pub fn base_timeout(mut self, timeout: Duration) -> Self {
-        self.base_timeout = timeout;
+        self.base_timeout = Some(timeout);
         self
     }
 
     /// 设置域名访问的连接时长
     #[inline]
     pub fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.dial_timeout = timeout;
+        self.dial_timeout = Some(timeout);
         self
     }
 
@@ -230,7 +230,7 @@ impl RangeReaderBuilder {
     /// 一旦一个域名的被惩罚次数超过限制，则域名选择器不会选择该域名，除非被惩罚的域名比例超过上限，或惩罚时长超过指定时长
     #[inline]
     pub fn max_punished_times(mut self, max_times: usize) -> Self {
-        self.max_punished_times = max_times;
+        self.max_punished_times = Some(max_times);
         self
     }
 
@@ -239,7 +239,7 @@ impl RangeReaderBuilder {
     /// 域名选择器在搜索域名时，一旦被跳过的域名比例大于该值，则下一个域名将被选中，不管该域名是否也被惩罚。一旦该域名成功，则惩罚将立刻被取消
     #[inline]
     pub fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
-        self.max_punished_hosts_percent = percent;
+        self.max_punished_hosts_percent = Some(percent);
         self
     }
 
@@ -293,8 +293,7 @@ impl RangeReaderBuilder {
     }
 
     fn build_inner_and_key(self) -> (Arc<RangeReaderInner>, String) {
-        let http_client =
-            Timeouts::new(Some(self.base_timeout), Some(self.dial_timeout)).http_client();
+        let http_client = Timeouts::new(self.base_timeout, self.dial_timeout).http_client();
         let dotter = Dotter::new(
             http_client.to_owned(),
             self.credential.to_owned(),
@@ -302,52 +301,41 @@ impl RangeReaderBuilder {
             self.monitor_urls,
             self.dot_interval,
             self.max_dot_buffer_size,
-            Some(self.dot_tries),
-            Some(self.punish_duration),
-            Some(self.max_punished_times),
-            Some(self.max_punished_hosts_percent),
-            Some(self.base_timeout),
+            self.dot_tries,
+            self.punish_duration,
+            self.max_punished_times,
+            self.max_punished_hosts_percent,
+            self.base_timeout,
         );
+
+        let params = HostSelectorParams {
+            update_interval: self.update_interval,
+            punish_duration: self.punish_duration,
+            max_punished_times: self.max_punished_times,
+            max_punished_hosts_percent: self.max_punished_hosts_percent,
+            base_timeout: self.base_timeout,
+        };
 
         let io_querier = if self.uc_urls.is_empty() {
             None
         } else {
             Some(HostsQuerier::new(
-                HostSelector::builder(self.uc_urls)
-                    .update_interval(self.update_interval)
-                    .punish_duration(self.punish_duration)
-                    .max_punished_times(self.max_punished_times)
-                    .max_punished_hosts_percent(self.max_punished_hosts_percent)
-                    .base_timeout(self.base_timeout)
-                    .build(),
+                make_uc_host_selector(self.uc_urls, &params),
                 self.uc_tries,
                 dotter.to_owned(),
                 http_client.to_owned(),
             ))
         };
-        let access_key = self.credential.access_key().to_owned();
-        let bucket = self.bucket.to_owned();
-        let use_https = self.use_https;
+        let io_selector = make_io_selector(
+            self.io_urls,
+            io_querier,
+            self.credential.access_key().to_owned(),
+            self.bucket.to_owned(),
+            self.use_https,
+            &params,
+        );
 
-        let io_selector = HostSelector::builder(self.io_urls)
-            .update_callback(Some(Box::new(move || -> IOResult<Vec<String>> {
-                if let Some(io_querier) = &io_querier {
-                    io_querier.query_for_io_urls(&access_key, &bucket, use_https)
-                } else {
-                    Ok(vec![])
-                }
-            })))
-            .should_punish_callback(Some(Box::new(|error| {
-                !matches!(error.kind(), IOErrorKind::InvalidData)
-            })))
-            .update_interval(self.update_interval)
-            .punish_duration(self.punish_duration)
-            .max_punished_times(self.max_punished_times)
-            .max_punished_hosts_percent(self.max_punished_hosts_percent)
-            .base_timeout(self.base_timeout)
-            .build();
-
-        (
+        return (
             Arc::new(RangeReaderInner {
                 io_selector,
                 dotter,
@@ -361,7 +349,69 @@ impl RangeReaderBuilder {
                 private_url_lifetime: self.private_url_lifetime,
             }),
             self.key,
-        )
+        );
+
+        #[derive(Clone, Debug)]
+        struct HostSelectorParams {
+            update_interval: Option<Duration>,
+            punish_duration: Option<Duration>,
+            max_punished_times: Option<usize>,
+            max_punished_hosts_percent: Option<u8>,
+            base_timeout: Option<Duration>,
+        }
+
+        impl HostSelectorParams {
+            #[inline]
+            fn set_builder(&self, mut builder: HostSelectorBuilder) -> HostSelectorBuilder {
+                if let Some(update_interval) = self.update_interval {
+                    builder = builder.update_interval(update_interval);
+                }
+                if let Some(punish_duration) = self.punish_duration {
+                    builder = builder.punish_duration(punish_duration);
+                }
+                if let Some(max_punished_times) = self.max_punished_times {
+                    builder = builder.max_punished_times(max_punished_times);
+                }
+                if let Some(max_punished_hosts_percent) = self.max_punished_hosts_percent {
+                    builder = builder.max_punished_hosts_percent(max_punished_hosts_percent);
+                }
+                if let Some(base_timeout) = self.base_timeout {
+                    builder = builder.base_timeout(base_timeout);
+                }
+                builder
+            }
+        }
+
+        #[inline]
+        fn make_uc_host_selector(
+            uc_urls: Vec<String>,
+            params: &HostSelectorParams,
+        ) -> HostSelector {
+            params.set_builder(HostSelector::builder(uc_urls)).build()
+        }
+
+        #[inline]
+        fn make_io_selector(
+            io_urls: Vec<String>,
+            io_querier: Option<HostsQuerier>,
+            access_key: String,
+            bucket: String,
+            use_https: bool,
+            params: &HostSelectorParams,
+        ) -> HostSelector {
+            let builder = HostSelector::builder(io_urls)
+                .update_callback(Some(Box::new(move || -> IOResult<Vec<String>> {
+                    if let Some(io_querier) = &io_querier {
+                        io_querier.query_for_io_urls(&access_key, &bucket, use_https)
+                    } else {
+                        Ok(vec![])
+                    }
+                })))
+                .should_punish_callback(Some(Box::new(|error| {
+                    !matches!(error.kind(), IOErrorKind::InvalidData)
+                })));
+            params.set_builder(builder).build()
+        }
     }
 
     /// 从配置创建范围下载构建器
