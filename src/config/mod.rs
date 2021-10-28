@@ -10,13 +10,12 @@ pub(crate) use http_client::Timeouts;
 pub use multi_clusters::{
     MultipleClustersConfig, MultipleClustersConfigBuilder, MultipleClustersConfigParseError,
 };
-use once_cell::sync::Lazy;
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
 use super::{base::credential::Credential, download::RangeReaderBuilder};
 use log::{error, info, warn};
 use static_vars::qiniu_config;
-use std::{env, fs, sync::RwLock, time::Duration};
+use std::{env, fs, time::Duration};
 use tap::prelude::*;
 use thiserror::Error;
 use watcher::ensure_watches;
@@ -99,17 +98,20 @@ fn load_config() -> Option<Configurable> {
                         )
                     })
                     .ok()
-                    .tap_some(|config| {
-                        if env::var_os(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV).is_none() {
-                            ensure_watches(&config.config_paths()).ok();
-                        }
-                    })
+                    .tap_some(|config| ensure_watches_for(config))
                 })
         });
 
     enum EnvFrom {
         FromQiniu,
         FromQiniuMulti,
+    }
+}
+
+#[inline]
+fn ensure_watches_for(config: &Configurable) {
+    if env::var_os(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV).is_none() {
+        ensure_watches(&config.config_paths()).ok();
     }
 }
 
@@ -131,13 +133,10 @@ fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
                 new.set_config_select_callback_raw(current.take_config_select_callback());
             }
         }
-        ensure_watches(&config.config_paths()).ok();
+        ensure_watches_for(&config);
         info!("QINIU_CONFIG reloaded: {:?}", config);
         *current = Some(config);
     });
-    for handle in CONFIG_UPDATE_HANDLERS.read().unwrap().iter() {
-        handle();
-    }
 }
 
 /// 七牛配置信息解析错误
@@ -151,13 +150,6 @@ pub enum ClustersConfigParseError {
     /// 七牛配置信息 TOML 解析错误
     #[error("Parse config as toml error: {0}")]
     TOMLError(#[from] toml::de::Error),
-}
-
-type ConfigUpdateHandlers = Vec<fn()>;
-static CONFIG_UPDATE_HANDLERS: Lazy<RwLock<ConfigUpdateHandlers>> = Lazy::new(Default::default);
-
-pub(super) fn on_config_updated(handle: fn()) {
-    CONFIG_UPDATE_HANDLERS.write().unwrap().push(handle);
 }
 
 pub(super) fn build_range_reader_builder_from_config(
@@ -259,7 +251,6 @@ mod tests {
         fs::{remove_file, rename, OpenOptions},
         io::Write,
         path::PathBuf,
-        sync::atomic::{AtomicUsize, Ordering::Relaxed},
         thread::sleep,
     };
     use tempfile::{tempdir, Builder as TempFileBuilder};
@@ -286,22 +277,9 @@ mod tests {
         };
         let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
 
-        static UPDATED: AtomicUsize = AtomicUsize::new(0);
-
-        let loaded = load_config().unwrap();
-        assert_eq!(loaded.as_single(), Some(&config));
-
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
+        with_current_qiniu_config(|loaded| {
+            assert_eq!(loaded.and_then(|c| c.as_single()), Some(&config));
         });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-
-        sleep(Duration::from_secs(1));
 
         config.set_access_key("test-ak-2");
         config.set_secret_key("test-sk-2");
@@ -317,7 +295,13 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 3);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-2");
+            assert_eq!(config.secret_key(), "test-sk-2");
+            assert_eq!(config.bucket(), "test-bucket-2");
+        });
 
         config.set_access_key("test-ak-3");
         config.set_secret_key("test-sk-3");
@@ -334,7 +318,17 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 6);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-3");
+            assert_eq!(config.secret_key(), "test-sk-3");
+            assert_eq!(config.bucket(), "test-bucket-3");
+        });
+
+        config.set_access_key("test-ak-4");
+        config.set_secret_key("test-sk-4");
+        config.set_bucket("test-bucket-4");
 
         {
             let new_tempfile_path = {
@@ -352,7 +346,17 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 9);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-4");
+            assert_eq!(config.secret_key(), "test-sk-4");
+            assert_eq!(config.bucket(), "test-bucket-4");
+        });
+
+        config.set_access_key("test-ak-5");
+        config.set_secret_key("test-sk-5");
+        config.set_bucket("test-bucket-5");
 
         {
             let new_tempfile_path = {
@@ -371,7 +375,13 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 12);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-5");
+            assert_eq!(config.secret_key(), "test-sk-5");
+            assert_eq!(config.bucket(), "test-bucket-5");
+        });
 
         remove_file(&tempfile_path)?;
 
@@ -391,28 +401,26 @@ mod tests {
         )
         .build();
 
-        static UPDATED: AtomicUsize = AtomicUsize::new(0);
-        UPDATED.store(0, Relaxed);
-
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-
         set_qiniu_config(config.to_owned());
-        assert_eq!(UPDATED.load(Relaxed), 3);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-1");
+            assert_eq!(config.secret_key(), "test-sk-1");
+            assert_eq!(config.bucket(), "test-bucket-1");
+        });
 
         config.set_access_key("test-ak-2");
         config.set_secret_key("test-sk-2");
         config.set_bucket("test-bucket-2");
-
         set_qiniu_config(config);
-        assert_eq!(UPDATED.load(Relaxed), 6);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-2");
+            assert_eq!(config.secret_key(), "test-sk-2");
+            assert_eq!(config.bucket(), "test-bucket-2");
+        });
 
         Ok(())
     }
@@ -470,12 +478,6 @@ mod tests {
         };
         let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
 
-        static UPDATED: AtomicUsize = AtomicUsize::new(0);
-
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-
         with_current_qiniu_config_mut(|config| {
             let multi_config = config.unwrap().as_multi_mut().unwrap();
             assert!(multi_config
@@ -516,9 +518,6 @@ mod tests {
                 .is_none());
         });
 
-        sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 0);
-
         {
             let config = ConfigBuilder::new(
                 "test-ak-22",
@@ -531,7 +530,6 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 1);
 
         with_current_qiniu_config_mut(|config| {
             let multi_config = config.unwrap().as_multi_mut().unwrap();
@@ -578,7 +576,6 @@ mod tests {
         };
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 2);
 
         {
             let mut config = qiniu_config().write().unwrap();
@@ -612,7 +609,6 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 3);
 
         with_current_qiniu_config_mut(|config| {
             let multi_config = config.unwrap().as_multi_mut().unwrap();
@@ -644,7 +640,6 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 4);
 
         with_current_qiniu_config_mut(|config| {
             let multi_config = config.unwrap().as_multi_mut().unwrap();
@@ -677,7 +672,6 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 4);
 
         assert_eq!(watch_dirs_count(), 2);
         assert_eq!(watch_files_count(), 3);
@@ -690,7 +684,6 @@ mod tests {
         };
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 5);
 
         assert_eq!(watch_dirs_count(), 1);
         assert_eq!(watch_files_count(), 1);
@@ -722,20 +715,11 @@ mod tests {
         };
         let _env_guard = QiniuEnvGuard::new(tempfile_path.as_os_str());
 
-        static UPDATED: AtomicUsize = AtomicUsize::new(0);
-        UPDATED.store(0, Relaxed);
-
-        let loaded = load_config().unwrap();
-        assert_eq!(loaded.as_single(), Some(&config));
-
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
-        });
-        on_config_updated(|| {
-            UPDATED.fetch_add(1, Relaxed);
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-1");
+            assert_eq!(config.secret_key(), "test-sk-1");
+            assert_eq!(config.bucket(), "test-bucket-1");
         });
 
         sleep(Duration::from_secs(1));
@@ -754,7 +738,13 @@ mod tests {
         }
 
         sleep(Duration::from_secs(1));
-        assert_eq!(UPDATED.load(Relaxed), 0);
+
+        with_current_qiniu_config(|loaded| {
+            let config = loaded.and_then(|c| c.as_single()).unwrap();
+            assert_eq!(config.access_key(), "test-ak-1");
+            assert_eq!(config.secret_key(), "test-sk-1");
+            assert_eq!(config.bucket(), "test-bucket-1");
+        });
 
         Ok(())
     }
@@ -939,7 +929,6 @@ mod tests {
         #[inline]
         fn drop(&mut self) {
             reset_static_vars();
-            CONFIG_UPDATE_HANDLERS.write().unwrap().clear();
             unwatch_all().unwrap();
         }
     }
