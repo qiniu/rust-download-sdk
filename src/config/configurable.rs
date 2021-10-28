@@ -3,10 +3,7 @@ use super::{
     single_cluster::{Config, SingleClusterConfig},
     ClustersConfigParseError,
 };
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
 /// 七牛配置信息
 #[derive(Debug, Clone)]
@@ -93,22 +90,6 @@ impl Configurable {
             SingleClusterConfig::parse(path.as_ref(), bytes)
                 .map(ConfigurableInner::Single)
                 .map(Self)
-        }
-    }
-
-    #[inline]
-    pub(super) fn base_timeout(&self) -> Option<Duration> {
-        match &self.0 {
-            ConfigurableInner::Single(single) => single.base_timeout(),
-            ConfigurableInner::Multi(multi) => multi.base_timeout(),
-        }
-    }
-
-    #[inline]
-    pub(super) fn connect_timeout(&self) -> Option<Duration> {
-        match &self.0 {
-            ConfigurableInner::Single(single) => single.connect_timeout(),
-            ConfigurableInner::Multi(multi) => multi.connect_timeout(),
         }
     }
 

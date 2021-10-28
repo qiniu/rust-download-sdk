@@ -1,64 +1,25 @@
 mod configurable;
+mod http_client;
 mod multi_clusters;
 mod single_cluster;
 mod static_vars;
 mod watcher;
 
 pub use configurable::Configurable;
+pub(crate) use http_client::Timeouts;
 pub use multi_clusters::{
     MultipleClustersConfig, MultipleClustersConfigBuilder, MultipleClustersConfigParseError,
 };
 use once_cell::sync::Lazy;
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
-pub(crate) use static_vars::*;
-
 use super::{base::credential::Credential, download::RangeReaderBuilder};
 use log::{error, info, warn};
-use reqwest::blocking::Client as HTTPClient;
+use static_vars::qiniu_config;
 use std::{env, fs, sync::RwLock, time::Duration};
 use tap::prelude::*;
 use thiserror::Error;
 use watcher::ensure_watches;
-
-#[inline]
-fn build_http_client() -> RwLock<HTTPClient> {
-    return RwLock::new(_build_http_client()).tap(|_| {
-        on_config_updated(|| {
-            let mut http_client = http_client().write().unwrap();
-            *http_client = _build_http_client();
-            info!("HTTP_CLIENT reloaded: {:?}", *http_client);
-        })
-    });
-
-    fn _build_http_client() -> HTTPClient {
-        let mut base_timeout = Duration::from_millis(3000u64);
-        let mut dial_timeout = Duration::from_millis(50u64);
-        with_current_qiniu_config(|config| {
-            if let Some(config) = config {
-                if let Some(value) = config.base_timeout() {
-                    if value > Duration::from_millis(0) {
-                        base_timeout = value;
-                    }
-                }
-                if let Some(value) = config.connect_timeout() {
-                    if value > Duration::from_millis(0) {
-                        dial_timeout = value;
-                    }
-                }
-            }
-        });
-        let user_agent = format!("QiniuRustDownload/{}", env!("CARGO_PKG_VERSION"));
-        HTTPClient::builder()
-            .user_agent(user_agent)
-            .connect_timeout(dial_timeout)
-            .timeout(base_timeout)
-            .pool_max_idle_per_host(5)
-            .connection_verbose(true)
-            .build()
-            .expect("Failed to build Reqwest Client")
-    }
-}
 
 /// 判断当前是否已经启用七牛环境
 ///
@@ -81,7 +42,7 @@ pub fn with_current_qiniu_config<T>(f: impl FnOnce(Option<&Configurable>) -> T) 
 /// 需要注意的是，在回调函数内，当前七牛环境配置会被用写锁保护，因此回调函数应该尽快返回
 #[inline]
 pub fn with_current_qiniu_config_mut<T>(f: impl FnOnce(Option<&mut Configurable>) -> T) -> T {
-    f(qiniu_config().write().unwrap().as_mut())
+    with_current_qiniu_config_mut_inner(|config| f(config.as_mut()))
 }
 
 #[inline]
@@ -288,7 +249,9 @@ pub(super) fn build_range_reader_builder_from_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::download::RangeReader, watcher::unwatch_all, *};
+    use super::{
+        super::download::RangeReader, static_vars::reset_static_vars, watcher::unwatch_all, *,
+    };
     use anyhow::Result;
     use std::{
         collections::HashMap,

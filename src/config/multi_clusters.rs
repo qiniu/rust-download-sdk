@@ -9,7 +9,6 @@ use std::{
     mem::swap,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 use tap::TapFallible;
 use thiserror::Error;
@@ -76,22 +75,6 @@ impl MultipleClustersConfig {
         .tap_ok_mut(|config: &mut Self| {
             config.original_path = Some(path.to_owned());
         })
-    }
-
-    #[inline]
-    pub(super) fn base_timeout(&self) -> Option<Duration> {
-        self.configs
-            .iter()
-            .filter_map(|(_, config)| config.base_timeout())
-            .max()
-    }
-
-    #[inline]
-    pub(super) fn connect_timeout(&self) -> Option<Duration> {
-        self.configs
-            .iter()
-            .filter_map(|(_, config)| config.connect_timeout())
-            .max()
     }
 
     #[inline]
