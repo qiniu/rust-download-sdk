@@ -1,8 +1,8 @@
-use super::{single_cluster::Config, ClustersConfigParseError};
+use super::{single_cluster::Config, ClustersConfigParseError, Timeouts};
 use once_cell::sync::Lazy;
 use serde::Deserialize;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     convert::TryFrom,
     fmt, fs,
     io::Error as IOError,
@@ -26,7 +26,6 @@ static DEFAULT_CONFIG_SELECT_CALLBACK: Lazy<SelectConfigFn> =
 pub struct MultipleClustersConfig {
     configs: HashMap<String, Config>,
     original_path: Option<PathBuf>,
-    original_paths: HashMap<String, PathBuf>,
     select_config: SelectConfigFn,
 }
 
@@ -84,8 +83,21 @@ impl MultipleClustersConfig {
             .as_ref()
             .map(|path| vec![path.to_owned()])
             .unwrap_or_default();
-        paths.extend(self.original_paths.iter().map(|(_, path)| path).cloned());
+        paths.extend(
+            self.configs
+                .iter()
+                .filter_map(|(_, config)| config.original_path())
+                .map(|path| path.to_owned()),
+        );
         paths
+    }
+
+    #[inline]
+    pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
+        self.configs
+            .iter()
+            .map(|(_, config)| Timeouts::from(config))
+            .collect()
     }
 }
 
@@ -95,7 +107,6 @@ impl TryFrom<HashMap<String, PathBuf>> for MultipleClustersConfig {
     #[inline]
     fn try_from(configs: HashMap<String, PathBuf>) -> Result<Self, Self::Error> {
         Ok(Self {
-            original_paths: configs.to_owned(),
             configs: configs
                 .into_iter()
                 .map(|(name, path)| {
@@ -133,7 +144,6 @@ impl Default for MultipleClustersConfig {
         Self {
             configs: Default::default(),
             original_path: None,
-            original_paths: Default::default(),
             select_config: DEFAULT_CONFIG_SELECT_CALLBACK.to_owned(),
         }
     }
@@ -145,7 +155,6 @@ impl fmt::Debug for MultipleClustersConfig {
         f.debug_struct("MultipleClustersConfig")
             .field("configs", &self.configs)
             .field("original_path", &self.original_path)
-            .field("original_paths", &self.original_paths)
             .finish()
     }
 }
@@ -176,6 +185,13 @@ impl MultipleClustersConfigBuilder {
     #[inline]
     pub fn add_cluster(mut self, name: impl Into<String>, config: Config) -> Self {
         self.0.configs.insert(name.into(), config);
+        self
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn original_path(mut self, original_path: Option<PathBuf>) -> Self {
+        self.0.original_path = original_path;
         self
     }
 

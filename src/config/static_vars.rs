@@ -1,4 +1,4 @@
-use super::{configurable::Configurable, load_config};
+use super::{configurable::Configurable, init_config};
 use once_cell::sync::OnceCell;
 use std::sync::RwLock;
 
@@ -11,7 +11,7 @@ mod safe {
 
     #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
-        QINIU_CONFIG.get_or_init(|| RwLock::new(load_config()))
+        QINIU_CONFIG.get_or_init(init_config)
     }
 }
 
@@ -27,7 +27,7 @@ mod not_safe {
 
     #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
-        unsafe { &mut QINIU_CONFIG }.get_or_init(|| RwLock::new(load_config()))
+        unsafe { &mut QINIU_CONFIG }.get_or_init(init_config)
     }
 
     pub(in super::super) fn reset_static_vars() {

@@ -1,7 +1,8 @@
-use super::{super::download::RangeReaderInner, ClustersConfigParseError};
+use super::{super::download::RangeReaderInner, ClustersConfigParseError, Timeouts};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::HashSet,
     convert::TryInto,
     path::{Path, PathBuf},
     sync::Arc,
@@ -83,6 +84,7 @@ impl Config {
     #[inline]
     pub fn set_access_key(&mut self, access_key: impl Into<String>) -> &mut Self {
         self.access_key = access_key.into();
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -96,6 +98,7 @@ impl Config {
     #[inline]
     pub fn set_secret_key(&mut self, secret_key: impl Into<String>) -> &mut Self {
         self.secret_key = secret_key.into();
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -109,6 +112,7 @@ impl Config {
     #[inline]
     pub fn set_bucket(&mut self, bucket: impl Into<String>) -> &mut Self {
         self.bucket = bucket.into();
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -122,6 +126,7 @@ impl Config {
     #[inline]
     pub fn set_io_urls(&mut self, io_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
         self.io_urls = io_urls.map(|urls| urls.into());
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -135,6 +140,7 @@ impl Config {
     #[inline]
     pub fn set_uc_urls(&mut self, uc_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
         self.uc_urls = uc_urls.map(|urls| urls.into());
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -148,6 +154,7 @@ impl Config {
     #[inline]
     pub fn set_monitor_urls(&mut self, monitor_urls: Option<impl Into<Vec<String>>>) -> &mut Self {
         self.monitor_urls = monitor_urls.map(|urls| urls.into());
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -161,6 +168,7 @@ impl Config {
     #[inline]
     pub fn set_use_getfile_api(&mut self, use_getfile_api: Option<bool>) -> &mut Self {
         self.sim = use_getfile_api.map(|b| !b);
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -174,6 +182,7 @@ impl Config {
     #[inline]
     pub fn set_normalize_key(&mut self, normalize_key: Option<bool>) -> &mut Self {
         self.normalize_key = normalize_key;
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -187,6 +196,7 @@ impl Config {
     #[inline]
     pub fn set_private(&mut self, private: Option<bool>) -> &mut Self {
         self.private = private;
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -200,6 +210,7 @@ impl Config {
     #[inline]
     pub fn set_retry(&mut self, retry: Option<usize>) -> &mut Self {
         self.retry = retry;
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -213,6 +224,7 @@ impl Config {
     #[inline]
     pub fn set_dot_interval(&mut self, dot_interval: Option<Duration>) -> &mut Self {
         self.dot_interval_s = dot_interval.map(|d| d.as_secs());
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -226,6 +238,7 @@ impl Config {
     #[inline]
     pub fn set_max_dot_buffer_size(&mut self, max_dot_buffer_size: Option<u64>) -> &mut Self {
         self.max_dot_buffer_size = max_dot_buffer_size;
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -239,6 +252,7 @@ impl Config {
     #[inline]
     pub fn set_punish_time(&mut self, punish_time: Option<Duration>) -> &mut Self {
         self.punish_time_s = punish_time.map(|d| d.as_secs());
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -252,6 +266,7 @@ impl Config {
     #[inline]
     pub fn set_base_timeout(&mut self, base_timeout: Option<Duration>) -> &mut Self {
         self.base_timeout_ms = base_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self.uninit_range_reader_inner();
         self
     }
 
@@ -266,11 +281,11 @@ impl Config {
     pub fn set_connect_timeout(&mut self, connect_timeout: Option<Duration>) -> &mut Self {
         self.dial_timeout_ms =
             connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self.uninit_range_reader_inner();
         self
     }
 
     #[inline]
-    #[allow(dead_code)]
     pub(super) fn original_path(&self) -> Option<&Path> {
         self.extra.original_path.as_ref().map(|p| p.as_ref())
     }
@@ -291,11 +306,23 @@ impl Config {
     }
 
     #[inline]
+    pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
+        let mut set = HashSet::with_capacity(1);
+        set.insert(Timeouts::from(self));
+        set
+    }
+
+    #[inline]
     pub(crate) fn get_or_init_range_reader_inner(
         &self,
         f: impl FnOnce() -> Arc<RangeReaderInner>,
     ) -> Arc<RangeReaderInner> {
         self.extra.range_reader_inner.get_or_init(f).to_owned()
+    }
+
+    #[inline]
+    fn uninit_range_reader_inner(&mut self) {
+        self.extra.range_reader_inner.take();
     }
 }
 
@@ -432,6 +459,13 @@ impl ConfigBuilder {
     #[inline]
     pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: Option<u64>) -> Self {
         self.0.max_dot_buffer_size = max_dot_buffer_size;
+        self
+    }
+
+    #[inline]
+    #[cfg(test)]
+    pub(super) fn original_path(mut self, original_path: Option<PathBuf>) -> Self {
+        self.0.extra.original_path = original_path;
         self
     }
 }

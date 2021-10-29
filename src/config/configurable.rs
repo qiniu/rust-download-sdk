@@ -1,9 +1,12 @@
 use super::{
     multi_clusters::MultipleClustersConfig,
     single_cluster::{Config, SingleClusterConfig},
-    ClustersConfigParseError,
+    ClustersConfigParseError, Timeouts,
 };
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
 /// 七牛配置信息
 #[derive(Debug, Clone)]
@@ -98,6 +101,14 @@ impl Configurable {
         match &self.0 {
             ConfigurableInner::Single(single) => single.config_paths(),
             ConfigurableInner::Multi(multi) => multi.config_paths(),
+        }
+    }
+
+    #[inline]
+    pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
+        match &self.0 {
+            ConfigurableInner::Single(single) => single.timeouts_set(),
+            ConfigurableInner::Multi(multi) => multi.timeouts_set(),
         }
     }
 }

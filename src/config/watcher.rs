@@ -84,12 +84,13 @@ fn remove_from_watcher(path: &Path) -> NotifyResult<()> {
 }
 
 #[inline]
-#[cfg(test)]
 pub(super) fn unwatch_all() -> NotifyResult<()> {
     {
         let mut watcher = WATCHER.write().unwrap();
         for watched_dir in WATCHED_DIRS.iter() {
-            watcher.unwatch(watched_dir.key())?;
+            watcher
+                .unwatch(watched_dir.key())
+                .tap_err(|err| warn!("Failed to unwatch {:?}: {:?}", watched_dir.key(), err))?;
         }
     }
 

@@ -2,13 +2,18 @@ use super::SingleClusterConfig;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use reqwest::blocking::Client as HTTPClient;
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashSet, sync::Arc, time::Duration};
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct Timeouts {
     base_timeout: Duration,
     dial_timeout: Duration,
 }
+
+type Key = Timeouts;
+type Value = Arc<HTTPClient>;
+
+static HTTP_CLIENTS: Lazy<DashMap<Key, Value>> = Lazy::new(Default::default);
 
 impl Timeouts {
     #[inline]
@@ -31,11 +36,6 @@ impl Timeouts {
 
     #[inline]
     pub(crate) fn http_client(&self) -> Arc<HTTPClient> {
-        type Key = Timeouts;
-        type Value = Arc<HTTPClient>;
-
-        static HTTP_CLIENTS: Lazy<DashMap<Key, Value>> = Lazy::new(Default::default);
-
         return HTTP_CLIENTS
             .entry(self.to_owned())
             .or_insert_with(|| build_http_client(self))
@@ -62,6 +62,11 @@ impl<'a> From<&'a SingleClusterConfig> for Timeouts {
     fn from(config: &'a SingleClusterConfig) -> Self {
         Self::new(config.base_timeout(), config.connect_timeout())
     }
+}
+
+#[inline]
+pub(super) fn ensure_http_clients(set: &HashSet<Timeouts>) {
+    HTTP_CLIENTS.retain(|key, _| set.contains(key))
 }
 
 #[cfg(test)]
