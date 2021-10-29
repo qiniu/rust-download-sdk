@@ -1,13 +1,12 @@
 use super::{
     base::{credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token},
     cache_dir_path_of,
-    config::http_client,
     host_selector::{HostSelector, PunishResult},
 };
 use dashmap::DashMap;
 use fd_lock::FdLock;
 use log::{debug, info, warn};
-use reqwest::{header::AUTHORIZATION, StatusCode};
+use reqwest::{blocking::Client as HTTPClient, header::AUTHORIZATION, StatusCode};
 use serde::{de::Error as DeserializeError, Deserialize, Serialize};
 use serde_json::Value as JSONValue;
 use std::{
@@ -132,6 +131,7 @@ struct DotterInner {
     uploaded_at: Instant,
     max_buffer_size: u64,
     tries: usize,
+    http_client: Arc<HTTPClient>,
 }
 
 pub(super) const DOT_FILE_NAME: &str = "dot-file";
@@ -139,6 +139,7 @@ pub(super) const DOT_FILE_NAME: &str = "dot-file";
 impl Dotter {
     #[allow(clippy::too_many_arguments)]
     pub(super) fn new(
+        http_client: Arc<HTTPClient>,
         credential: Credential,
         bucket: String,
         monitor_urls: Vec<String>,
@@ -169,6 +170,7 @@ impl Dotter {
                             credential,
                             bucket,
                             monitor_selector,
+                            http_client,
                             buffered_records: Default::default(),
                             buffered_file: Mutex::new(FdLock::new(buffer_file)),
                             interval: interval.unwrap_or_else(|| Duration::from_secs(10)),
@@ -328,9 +330,7 @@ impl DotterInner {
                 ),
             );
             let begin_at = Instant::now();
-            http_client()
-                .read()
-                .unwrap()
+            self.http_client
                 .post(&url)
                 .header(AUTHORIZATION, format!("UpToken {}", uptoken))
                 .json(&self.make_request_body(&mut buffered_file)?)
@@ -779,6 +779,7 @@ impl Deref for DotRecordsDashMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Timeouts;
     use futures::channel::oneshot::channel;
     use rayon::ThreadPoolBuilder;
     use std::{error::Error, sync::atomic::AtomicUsize, thread::sleep};
@@ -853,6 +854,7 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     vec![],
@@ -878,6 +880,7 @@ mod tests {
 
                 let urls = vec!["http://".to_owned() + &addr.to_string()];
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     urls,
@@ -937,6 +940,7 @@ mod tests {
             ];
             spawn_blocking(move || {
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     urls,
@@ -1172,6 +1176,7 @@ mod tests {
             let urls = vec!["http://".to_owned() + &addr.to_string()];
             spawn_blocking(move || {
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     urls,

@@ -1,6 +1,5 @@
-use super::{build_http_client, configurable::Configurable, load_config};
+use super::{configurable::Configurable, init_config};
 use once_cell::sync::OnceCell;
-use reqwest::blocking::Client as HTTPClient;
 use std::sync::RwLock;
 
 #[cfg(not(test))]
@@ -12,19 +11,12 @@ mod safe {
 
     #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
-        QINIU_CONFIG.get_or_init(|| RwLock::new(load_config()))
-    }
-
-    static HTTP_CLIENT: OnceCell<RwLock<HTTPClient>> = OnceCell::new();
-
-    #[inline]
-    pub(crate) fn http_client() -> &'static RwLock<HTTPClient> {
-        HTTP_CLIENT.get_or_init(build_http_client)
+        QINIU_CONFIG.get_or_init(init_config)
     }
 }
 
 #[cfg(not(test))]
-pub(crate) use safe::*;
+pub(super) use safe::qiniu_config;
 
 #[cfg(test)]
 mod not_safe {
@@ -35,20 +27,12 @@ mod not_safe {
 
     #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
-        unsafe { &mut QINIU_CONFIG }.get_or_init(|| RwLock::new(load_config()))
-    }
-
-    static mut HTTP_CLIENT: OnceCell<RwLock<HTTPClient>> = OnceCell::new();
-
-    #[inline]
-    pub(crate) fn http_client() -> &'static RwLock<HTTPClient> {
-        unsafe { &mut HTTP_CLIENT }.get_or_init(build_http_client)
+        unsafe { &mut QINIU_CONFIG }.get_or_init(init_config)
     }
 
     pub(in super::super) fn reset_static_vars() {
         unsafe { &mut QINIU_CONFIG }.take();
-        unsafe { &mut HTTP_CLIENT }.take();
     }
 }
 #[cfg(test)]
-pub(crate) use not_safe::*;
+pub(super) use not_safe::{qiniu_config, reset_static_vars};

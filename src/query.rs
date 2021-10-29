@@ -1,13 +1,12 @@
 use super::{
     cache_dir_path_of,
-    config::http_client,
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
 };
 use dashmap::DashMap;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use reqwest::StatusCode;
+use reqwest::{blocking::Client as HTTPClient, StatusCode};
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -19,7 +18,7 @@ use std::{
     fs::{rename as rename_file, OpenOptions},
     io::{Error as IOError, ErrorKind as IOErrorKind, Result as IOResult},
     path::Path,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     thread::spawn,
     time::{Duration, Instant, SystemTime},
 };
@@ -109,15 +108,22 @@ pub(super) struct HostsQuerier {
     uc_selector: HostSelector,
     uc_tries: usize,
     dotter: Dotter,
+    http_client: Arc<HTTPClient>,
 }
 
 impl HostsQuerier {
     #[inline]
-    pub(super) fn new(uc_selector: HostSelector, uc_tries: usize, dotter: Dotter) -> Self {
+    pub(super) fn new(
+        uc_selector: HostSelector,
+        uc_tries: usize,
+        dotter: Dotter,
+        http_client: Arc<HTTPClient>,
+    ) -> Self {
         Self {
             uc_selector,
             uc_tries,
             dotter,
+            http_client,
         }
     }
 
@@ -165,6 +171,7 @@ impl HostsQuerier {
                     bucket,
                     &self.uc_selector,
                     self.uc_tries,
+                    &self.http_client,
                     &self.dotter,
                 );
                 if result.is_ok() {
@@ -177,6 +184,7 @@ impl HostsQuerier {
             let ak = ak.to_owned();
             let bucket = bucket.to_owned();
             let uc_selector = self.uc_selector.to_owned();
+            let http_client = self.http_client.to_owned();
             let dotter = self.dotter.to_owned();
             let uc_tries = self.uc_tries;
             spawn(move || {
@@ -188,6 +196,7 @@ impl HostsQuerier {
                             bucket,
                             &uc_selector,
                             uc_tries,
+                            &http_client,
                             &dotter,
                         ) {
                             *cache_value = new_cache_value;
@@ -212,6 +221,7 @@ fn query_for_domains_without_cache(
     bucket: impl AsRef<str>,
     uc_selector: &HostSelector,
     uc_tries: usize,
+    http_client: &HTTPClient,
     dotter: &Dotter,
 ) -> IOResult<CacheValue> {
     return query_with_retry(
@@ -235,9 +245,7 @@ fn query_for_domains_without_cache(
                 warn!("uc host {} is invalid", host);
             })?;
 
-            http_client()
-                .read()
-                .unwrap()
+            http_client
                 .get(&url.to_string())
                 .timeout(timeout)
                 .send()
@@ -417,6 +425,7 @@ mod tests {
     use super::{
         super::{
             base::credential::Credential,
+            config::Timeouts,
             dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,
@@ -536,6 +545,7 @@ mod tests {
         starts_with_server!(uc_addr, monitor_addr, uc_routes, monitor_routes, {
             spawn_blocking(move || -> IOResult<()> {
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     vec!["http://".to_owned() + &monitor_addr.to_string()],
@@ -550,7 +560,8 @@ mod tests {
                 let host_selector =
                     HostSelector::builder(vec!["http://".to_owned() + &uc_addr.to_string()])
                         .build();
-                let querier = HostsQuerier::new(host_selector, 1, dotter);
+                let querier =
+                    HostsQuerier::new(host_selector, 1, dotter, Timeouts::default_http_client());
                 let io_urls = querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(&io_urls, &["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(&querier.uc_selector.hosts(), &["uc.qbox.me".to_owned()]);
@@ -617,6 +628,7 @@ mod tests {
         starts_with_server!(uc_addr, monitor_addr, uc_routes, monitor_routes, {
             spawn_blocking(move || -> IOResult<()> {
                 let dotter = Dotter::new(
+                    Timeouts::default_http_client(),
                     get_credential(),
                     BUCKET_NAME.to_owned(),
                     vec!["http://".to_owned() + &monitor_addr.to_string()],
@@ -631,7 +643,8 @@ mod tests {
                 let host_selector =
                     HostSelector::builder(vec!["http://".to_owned() + &uc_addr.to_string()])
                         .build();
-                let hosts_querier = HostsQuerier::new(host_selector, 1, dotter);
+                let hosts_querier =
+                    HostsQuerier::new(host_selector, 1, dotter, Timeouts::default_http_client());
                 let mut io_urls =
                     hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
