@@ -29,19 +29,27 @@ use url::Url;
 struct CacheKey {
     ak: Box<str>,
     bucket: Box<str>,
+    hosts_crc32: u32,
 }
 
 impl CacheKey {
     #[inline]
-    fn new(ak: Box<str>, bucket: Box<str>) -> Self {
-        Self { ak, bucket }
+    fn new(ak: Box<str>, bucket: Box<str>, hosts_crc32: u32) -> Self {
+        Self {
+            ak,
+            bucket,
+            hosts_crc32,
+        }
     }
 }
 
 impl Serialize for CacheKey {
     #[inline]
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.collect_str(&format!("{}:{}", self.ak, self.bucket))
+        s.collect_str(&format!(
+            "cache-key-v2:{}:{}:{}",
+            self.ak, self.bucket, self.hosts_crc32
+        ))
     }
 }
 
@@ -56,13 +64,26 @@ impl<'de> Visitor<'de> for CacheKeyVisitor {
     }
 
     fn visit_str<E: DeError>(self, value: &str) -> Result<Self::Value, E> {
-        let mut iter = value.splitn(2, ':');
-        match (iter.next(), iter.next()) {
-            (Some(ak), Some(bucket)) => Ok(CacheKey {
-                ak: ak.into(),
-                bucket: bucket.into(),
-            }),
-            _ => Err(E::custom(format!("Invalid cache_key: {}", value))),
+        if let Some(value) = value.strip_prefix("cache-key-v2:") {
+            let mut iter = value.splitn(3, ':');
+            match (iter.next(), iter.next(), iter.next()) {
+                (Some(ak), Some(bucket), Some(crc32_str)) => Ok(CacheKey {
+                    ak: ak.into(),
+                    bucket: bucket.into(),
+                    hosts_crc32: crc32_str.parse().map_err(|err| {
+                        E::custom(format!(
+                            "Cannot parse hosts_crc32 from cache_key: {}: {}",
+                            value, err
+                        ))
+                    })?,
+                }),
+                _ => Err(E::custom(format!("Invalid cache_key: {}", value))),
+            }
+        } else {
+            Err(E::custom(format!(
+                "Unrecognized version of cache_key: {}",
+                value
+            )))
         }
     }
 }
@@ -160,7 +181,7 @@ impl HostsQuerier {
     }
 
     fn query_for_domains(&self, ak: &str, bucket: &str) -> IOResult<ResponseBody> {
-        let cache_key = CacheKey::new(ak.into(), bucket.into());
+        let cache_key = CacheKey::new(ak.into(), bucket.into(), self.uc_selector.all_hosts_crc32());
 
         let mut modified = false;
         let cache_value = CACHE_MAP
@@ -390,9 +411,9 @@ fn save_cache() -> IOResult<()> {
         return Ok(());
     }
     if let Err(err) = _save_cache(&cache_tempfile_path) {
-        warn!("Failed to save cache {:?}: {}", cache_file_path, err);
+        warn!("Failed to save cache {:?}: {}", cache_tempfile_path, err);
     } else {
-        info!("Save cache to {:?} successfully", cache_file_path);
+        info!("Save cache to {:?} successfully", cache_tempfile_path);
         if let Err(err) = rename_file(&cache_tempfile_path, &cache_file_path) {
             warn!(
                 "Failed to move cache file from {:?} to {:?}: {}",

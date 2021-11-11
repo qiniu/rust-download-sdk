@@ -468,6 +468,20 @@ impl HostSelector {
     }
 
     #[inline]
+    pub(super) fn all_hosts_crc32(&self) -> u32 {
+        let mut hosts = self.hosts_updater.hosts.read().unwrap().to_owned();
+        hosts.sort();
+        let mut hasher = crc32fast::Hasher::new();
+        hosts.iter().enumerate().for_each(|(i, host)| {
+            if i > 0 {
+                hasher.update(b"$");
+            }
+            hasher.update(host.as_bytes());
+        });
+        hasher.finalize()
+    }
+
+    #[inline]
     pub(super) fn update_hosts(&self) -> bool {
         if self.hosts_updater.update_hosts() {
             info!("manual update hosts successfully");
