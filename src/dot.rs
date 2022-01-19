@@ -4,7 +4,7 @@ use super::{
     host_selector::{HostSelector, PunishResult},
 };
 use dashmap::DashMap;
-use fd_lock::FdLock;
+use fd_lock::RwLock as FdRwLock;
 use log::{debug, info, warn};
 use reqwest::{blocking::Client as HTTPClient, header::AUTHORIZATION, StatusCode};
 use serde::{de::Error as DeserializeError, Deserialize, Serialize};
@@ -126,7 +126,7 @@ struct DotterInner {
     bucket: String,
     monitor_selector: HostSelector,
     buffered_records: DotRecordsDashMap,
-    buffered_file: Mutex<FdLock<File>>,
+    buffered_file: Mutex<FdRwLock<File>>,
     interval: Duration,
     uploaded_at: Instant,
     max_buffer_size: u64,
@@ -172,7 +172,7 @@ impl Dotter {
                             monitor_selector,
                             http_client,
                             buffered_records: Default::default(),
-                            buffered_file: Mutex::new(FdLock::new(buffer_file)),
+                            buffered_file: Mutex::new(FdRwLock::new(buffer_file)),
                             interval: interval.unwrap_or_else(|| Duration::from_secs(10)),
                             uploaded_at: Instant::now(),
                             max_buffer_size: max_buffer_size.unwrap_or(1 << 20),
@@ -422,7 +422,7 @@ impl DotterInner {
     fn lock_buffered_file(&self, f: impl FnOnce(&mut File) -> IOResult<()>) -> IOResult<()> {
         if let Ok(mut buffered_file) = self.buffered_file.try_lock() {
             loop {
-                match buffered_file.try_lock() {
+                match buffered_file.try_write() {
                     Ok(mut buffered_file) => {
                         return f(&mut buffered_file);
                     }
@@ -449,7 +449,7 @@ impl DotterInner {
     fn lock_buffered_file(&self, f: impl FnOnce(&mut File) -> IOResult<()>) -> IOResult<()> {
         if let Ok(mut buffered_file) = self.buffered_file.lock() {
             loop {
-                match buffered_file.lock() {
+                match buffered_file.write() {
                     Ok(mut buffered_file) => {
                         return f(&mut buffered_file);
                     }

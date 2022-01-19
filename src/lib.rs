@@ -17,6 +17,7 @@ use std::{
 };
 use tap::TapFallible;
 
+mod async_api;
 mod base;
 mod config;
 mod dot;
