@@ -1,4 +1,5 @@
 #![warn(missing_docs)]
+#![deny(unused_must_use)]
 
 //! # qiniu-download
 //!

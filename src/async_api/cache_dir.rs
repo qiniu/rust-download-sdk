@@ -9,7 +9,7 @@ use std::{
 use tap::TapFallible;
 use tokio::fs;
 
-async fn cache_dir_path_of(path: impl AsRef<Path>) -> IoResult<PathBuf> {
+pub(super) async fn cache_dir_path_of(path: impl AsRef<Path>) -> IoResult<PathBuf> {
     return _cache_dir_path_of(path.as_ref())
         .await
         .tap_err(|err| warn!("Failed to get cache directory: {}", err));

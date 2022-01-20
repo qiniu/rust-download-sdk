@@ -1,7 +1,7 @@
 #![allow(dead_code, unused_imports)]
 
 mod cache_dir;
-
+mod dot;
 mod host_selector;
 
 mod req_id;
