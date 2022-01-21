@@ -308,7 +308,7 @@ impl DotterInner {
         return Ok(());
 
         #[inline]
-        async fn write_to_file<W: AsyncWrite+Unpin>(
+        async fn write_to_file<W: AsyncWrite + Unpin>(
             record: &DotRecord,
             file: &mut W,
         ) -> anyhow::Result<()> {
@@ -415,8 +415,8 @@ impl DotterInner {
     }
 
     async fn upload_with_retry<
-        F: FnMut(String, Duration, usize) -> T,
-        T: Future<Output = IoResult<()>>,
+        F: FnMut(String, Duration, usize) -> Fut,
+        Fut: Future<Output = IoResult<()>>,
     >(
         &self,
         mut for_each_host: F,
@@ -461,7 +461,7 @@ impl DotterInner {
     }
 
     #[cfg(not(test))]
-    async fn lock_buffered_file<F: FnOnce(File) -> T, T: Future<Output = IoResult<()>>>(
+    async fn lock_buffered_file<F: FnOnce(File) -> Fut, Fut: Future<Output = IoResult<()>>>(
         &self,
         f: F,
     ) -> IoResult<()> {
