@@ -9,7 +9,7 @@ use std::{
 static START_TIME: AtomicU64 = AtomicU64::new(0);
 
 /// 设置下载起始时间
-pub(crate) fn set_download_start_time(t: SystemTime) {
+pub fn set_download_start_time(t: SystemTime) {
     START_TIME.store(
         t.duration_since(UNIX_EPOCH)
             .map_or(0, |n| n.as_millis().try_into().unwrap_or(u64::MAX)),
@@ -18,7 +18,7 @@ pub(crate) fn set_download_start_time(t: SystemTime) {
 }
 
 /// 获取下载结束之间到下载起始时间之间的时长
-pub(crate) fn total_download_duration(t: SystemTime) -> Duration {
+pub fn total_download_duration(t: SystemTime) -> Duration {
     let end_time: u64 = t
         .duration_since(UNIX_EPOCH)
         .map_or(0, |n| n.as_millis().try_into().unwrap_or(u64::MAX));

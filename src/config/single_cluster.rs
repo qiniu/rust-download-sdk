@@ -1,14 +1,19 @@
-use super::{super::download::RangeReaderInner, ClustersConfigParseError, Timeouts};
+use super::{
+    super::{async_api::RangeReaderInner as AsyncRangeReaderInner, download::RangeReaderInner},
+    ClustersConfigParseError, Timeouts,
+};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     convert::TryInto,
+    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 use tap::TapFallible;
+use tokio::sync::OnceCell as AsyncOnceCell;
 
 /// 单集群七牛配置信息
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
@@ -321,8 +326,24 @@ impl Config {
     }
 
     #[inline]
+    pub(crate) async fn get_or_init_async_range_reader_inner<
+        F: FnOnce() -> Fut,
+        Fut: Future<Output = Arc<AsyncRangeReaderInner>>,
+    >(
+        &self,
+        f: F,
+    ) -> Arc<AsyncRangeReaderInner> {
+        self.extra
+            .async_range_reader_inner
+            .get_or_init(f)
+            .await
+            .to_owned()
+    }
+
+    #[inline]
     fn uninit_range_reader_inner(&mut self) {
         self.extra.range_reader_inner.take();
+        self.extra.async_range_reader_inner.take();
     }
 }
 
@@ -481,6 +502,7 @@ impl From<Config> for ConfigBuilder {
 struct Extra {
     original_path: Option<PathBuf>,
     range_reader_inner: OnceCell<Arc<RangeReaderInner>>,
+    async_range_reader_inner: AsyncOnceCell<Arc<AsyncRangeReaderInner>>,
 }
 
 impl PartialEq for Extra {

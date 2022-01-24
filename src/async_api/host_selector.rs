@@ -429,13 +429,6 @@ impl HostSelectorBuilder {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct HostInfo {
-    pub(super) host: String,
-    pub(super) timeout_power: usize,
-    pub(super) timeout: Duration,
-}
-
 impl HostSelector {
     #[inline]
     pub(super) fn builder(hosts: Vec<String>) -> HostSelectorBuilder {
@@ -646,6 +639,39 @@ pub(super) enum PunishResult {
     NoPunishment,
     Punished,
     PunishedAndFreezed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct HostInfo {
+    host: String,
+    timeout_power: usize,
+    timeout: Duration,
+}
+
+impl HostInfo {
+    pub(crate) fn host(&self) -> &str {
+        &self.host
+    }
+
+    pub(crate) fn timeout_power(&self) -> usize {
+        self.timeout_power
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.timeout
+    }
+
+    pub(crate) fn host_mut(&mut self) -> &mut String {
+        &mut self.host
+    }
+
+    pub(crate) fn timeout_power_mut(&mut self) -> &mut usize {
+        &mut self.timeout_power
+    }
+
+    pub(crate) fn timeout_mut(&mut self) -> &mut Duration {
+        &mut self.timeout
+    }
 }
 
 #[cfg(test)]

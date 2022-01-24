@@ -3,7 +3,7 @@ use super::{
         credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token,
     },
     cache_dir::cache_dir_path_of,
-    host_selector::{HostSelector, PunishResult},
+    host_selector::{HostInfo, HostSelector, PunishResult},
 };
 use dashmap::DashMap;
 use fd_lock::{RwLock as FdRwLock, RwLockWriteGuard as FdRwLockWriteGuard};
@@ -38,19 +38,19 @@ static DOTTING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// 禁止打点功能
 #[inline]
-pub(crate) fn disable_dotting() {
+pub fn disable_dotting() {
     DOTTING_DISABLED.store(true, Relaxed)
 }
 
 /// 启用打点功能
 #[inline]
-pub(crate) fn enable_dotting() {
+pub fn enable_dotting() {
     DOTTING_DISABLED.store(false, Relaxed)
 }
 
 /// 打点功能是否启用
 #[inline]
-pub(crate) fn is_dotting_disabled() -> bool {
+pub fn is_dotting_disabled() -> bool {
     DOTTING_DISABLED.load(Relaxed)
 }
 
@@ -58,19 +58,19 @@ static DOT_UPLOADING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// 禁止打点上传功能
 #[inline]
-pub(crate) fn disable_dot_uploading() {
+pub fn disable_dot_uploading() {
     DOT_UPLOADING_DISABLED.store(true, Relaxed)
 }
 
 /// 启用打点上传功能
 #[inline]
-pub(crate) fn enable_dot_uploading() {
+pub fn enable_dot_uploading() {
     DOT_UPLOADING_DISABLED.store(false, Relaxed)
 }
 
 /// 打点上传功能是否启用
 #[inline]
-pub(crate) fn is_dot_uploading_disabled() -> bool {
+pub fn is_dot_uploading_disabled() -> bool {
     DOT_UPLOADING_DISABLED.load(Relaxed)
 }
 
@@ -340,13 +340,13 @@ impl DotterInner {
     }
 
     async fn do_upload(&self) -> IoResult<()> {
-        self.upload_with_retry(|monitor_host, timeout, timeout_power| async move {
+        self.upload_with_retry(|host_info| async move {
             let mut buffered_file = OpenOptions::new()
                 .read(true)
                 .write(true)
                 .open(&cache_dir_path_of(DOT_FILE_NAME).await?)
                 .await?;
-            let url = format!("{}/v1/stat", monitor_host);
+            let url = format!("{}/v1/stat", host_info.host());
             debug!("try to upload dots to {}", url);
             let uptoken = sign_upload_token(
                 &self.credential,
@@ -360,13 +360,13 @@ impl DotterInner {
                 .post(&url)
                 .header(AUTHORIZATION, format!("UpToken {}", uptoken))
                 .json(&self.make_request_body(&mut buffered_file).await?)
-                .timeout(timeout)
+                .timeout(host_info.timeout())
                 .send()
                 .await
                 .tap_err(|err| {
                     if err.is_timeout() {
                         self.monitor_selector
-                            .increase_timeout_power_by(&monitor_host, timeout_power);
+                            .increase_timeout_power_by(host_info.host(), host_info.timeout_power());
                     }
                 })
                 .map_err(|err| IoError::new(IoErrorKind::ConnectionAborted, err))
@@ -414,10 +414,7 @@ impl DotterInner {
         Ok(map.into_records())
     }
 
-    async fn upload_with_retry<
-        F: FnMut(String, Duration, usize) -> Fut,
-        Fut: Future<Output = IoResult<()>>,
-    >(
+    async fn upload_with_retry<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = IoResult<()>>>(
         &self,
         mut for_each_host: F,
     ) -> IoResult<()> {
@@ -425,21 +422,15 @@ impl DotterInner {
         for _ in 0..self.tries {
             // 允许选择重复的节点，因为生产环境上可能只有一台 kodomonitor，只能选它
             if let Some(host_info) = self.monitor_selector.select_host(&Default::default()).await {
-                match for_each_host(
-                    host_info.host.to_owned(),
-                    host_info.timeout,
-                    host_info.timeout_power,
-                )
-                .await
-                {
+                match for_each_host(host_info.to_owned()).await {
                     Ok(response) => {
-                        self.monitor_selector.reward(&host_info.host).await;
+                        self.monitor_selector.reward(host_info.host()).await;
                         return Ok(response);
                     }
                     Err(err) => {
                         let punished_result = self
                             .monitor_selector
-                            .punish_without_dotter(&host_info.host, &err)
+                            .punish_without_dotter(host_info.host(), &err)
                             .await;
                         match punished_result {
                             PunishResult::NoPunishment => {

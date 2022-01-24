@@ -1,7 +1,7 @@
 use super::{
     cache_dir::cache_dir_path_of,
     dot::{ApiName, DotType, Dotter},
-    host_selector::HostSelector,
+    host_selector::{HostInfo, HostSelector},
 };
 use atomic_once_cell::AtomicLazy;
 use futures::{TryFutureExt, TryStreamExt};
@@ -256,100 +256,104 @@ async fn query_for_domains_without_cache(
 ) -> IoResult<CacheValue> {
     let ak = ak.as_ref();
     let bucket = bucket.as_ref();
-    return query_with_retry(
-        uc_selector,
-        uc_tries,
-        dotter,
-        |host, timeout_power, timeout| async move {
-            info!(
-                "try to query hosts from {}, ak = {}, bucket = {}",
-                &host, &ak, &bucket
-            );
+    return query_with_retry(uc_selector, uc_tries, dotter, |host_info| async move {
+        info!(
+            "try to query hosts from {}, ak = {}, bucket = {}",
+            host_info.host(),
+            &ak,
+            &bucket
+        );
 
-            let url = Url::parse_with_params(
-                &format!("{}/v4/query", &host),
-                &[("ak", &ak), ("bucket", &bucket)],
-            )
-            .map_err(|err| IoError::new(IoErrorKind::InvalidInput, err))
-            .tap_err(|_| {
-                warn!("uc host {} is invalid", host);
-            })?;
+        let url = Url::parse_with_params(
+            &format!("{}/v4/query", host_info.host()),
+            &[("ak", &ak), ("bucket", &bucket)],
+        )
+        .map_err(|err| IoError::new(IoErrorKind::InvalidInput, err))
+        .tap_err(|_| {
+            warn!("uc host {} is invalid", host_info.host());
+        })?;
 
-            let body_result = match http_client
-                .get(&url.to_string())
-                .timeout(timeout)
-                .send()
-                .await
-            {
-                Ok(resp) => {
-                    if resp.status() != StatusCode::OK {
-                        Err(IoError::new(
-                            IoErrorKind::Other,
-                            format!("Unexpected status code {}", resp.status().as_u16()),
-                        ))
-                    } else {
-                        resp.json::<ResponseBody>()
-                            .await
-                            .tap_err(|err| {
-                                if err.is_timeout() {
-                                    uc_selector.increase_timeout_power_by(&host, timeout_power);
-                                }
-                            })
-                            .map_err(|err| IoError::new(IoErrorKind::BrokenPipe, err))
-                    }
-                }
-                Err(err) => {
-                    if err.is_timeout() {
-                        uc_selector.increase_timeout_power_by(&host, timeout_power);
-                    }
-                    Err(IoError::new(IoErrorKind::ConnectionAborted, err))
-                }
-            };
-
-            if let Ok(body) = body_result.as_ref() {
-                let uc_hosts: Vec<_> = body
-                    .hosts
-                    .first()
-                    .map(|host| {
-                        host.uc
-                            .domains
-                            .iter()
-                            .map(|domain| domain.to_string())
-                            .collect()
-                    })
-                    .expect("No host in uc query v4 response body");
-                if !uc_hosts.is_empty() {
-                    uc_selector.set_hosts(uc_hosts).await;
+        let body_result = match http_client
+            .get(&url.to_string())
+            .timeout(host_info.timeout())
+            .send()
+            .await
+        {
+            Ok(resp) => {
+                if resp.status() != StatusCode::OK {
+                    Err(IoError::new(
+                        IoErrorKind::Other,
+                        format!("Unexpected status code {}", resp.status().as_u16()),
+                    ))
+                } else {
+                    resp.json::<ResponseBody>()
+                        .await
+                        .tap_err(|err| {
+                            if err.is_timeout() {
+                                uc_selector.increase_timeout_power_by(
+                                    host_info.host(),
+                                    host_info.timeout_power(),
+                                );
+                            }
+                        })
+                        .map_err(|err| IoError::new(IoErrorKind::BrokenPipe, err))
                 }
             }
+            Err(err) => {
+                if err.is_timeout() {
+                    uc_selector
+                        .increase_timeout_power_by(host_info.host(), host_info.timeout_power());
+                }
+                Err(IoError::new(IoErrorKind::ConnectionAborted, err))
+            }
+        };
 
-            body_result
-                .map(|body| {
-                    let min_ttl = body
-                        .hosts
+        if let Ok(body) = body_result.as_ref() {
+            let uc_hosts: Vec<_> = body
+                .hosts
+                .first()
+                .map(|host| {
+                    host.uc
+                        .domains
                         .iter()
-                        .map(|host| host.ttl)
-                        .min()
-                        .expect("No host in uc query v4 response body");
-                    CacheValue {
-                        cached_response_body: body,
-                        cache_deadline: SystemTime::now() + Duration::from_secs(min_ttl),
-                    }
+                        .map(|domain| domain.to_string())
+                        .collect()
                 })
-                .tap_ok(|_| {
-                    info!(
-                        "update query cache for ak = {}, bucket = {} is successful",
-                        ak, bucket,
-                    );
-                })
-                .tap_err(|err| {
-                    warn!(
-                        "failed to query hosts from {}, ak = {}, bucket = {}, err = {:?}",
-                        host, ak, bucket, err
-                    );
-                })
-        },
-    )
+                .expect("No host in uc query v4 response body");
+            if !uc_hosts.is_empty() {
+                uc_selector.set_hosts(uc_hosts).await;
+            }
+        }
+
+        body_result
+            .map(|body| {
+                let min_ttl = body
+                    .hosts
+                    .iter()
+                    .map(|host| host.ttl)
+                    .min()
+                    .expect("No host in uc query v4 response body");
+                CacheValue {
+                    cached_response_body: body,
+                    cache_deadline: SystemTime::now() + Duration::from_secs(min_ttl),
+                }
+            })
+            .tap_ok(|_| {
+                info!(
+                    "update query cache for ak = {}, bucket = {} is successful",
+                    ak, bucket,
+                );
+            })
+            .tap_err(|err| {
+                warn!(
+                    "failed to query hosts from {}, ak = {}, bucket = {}, err = {:?}",
+                    host_info.host(),
+                    ak,
+                    bucket,
+                    err
+                );
+            })
+    })
     .await
     .and_then(|cache_value| {
         cache_value.map(Ok).unwrap_or_else(|| {
@@ -360,11 +364,7 @@ async fn query_for_domains_without_cache(
         })
     });
 
-    async fn query_with_retry<
-        T,
-        F: FnMut(String, usize, Duration) -> Fut,
-        Fut: Future<Output = IoResult<T>>,
-    >(
+    async fn query_with_retry<T, F: FnMut(HostInfo) -> Fut, Fut: Future<Output = IoResult<T>>>(
         uc_selector: &HostSelector,
         tries: usize,
         dotter: &Dotter,
@@ -375,15 +375,9 @@ async fn query_for_domains_without_cache(
             let host_info = uc_selector.select_host(&Default::default()).await;
             if let Some(host_info) = host_info {
                 let begin_at = Instant::now();
-                match for_each_host(
-                    host_info.host.to_owned(),
-                    host_info.timeout_power,
-                    host_info.timeout,
-                )
-                .await
-                {
+                match for_each_host(host_info.to_owned()).await {
                     Ok(response) => {
-                        uc_selector.reward(&host_info.host).await;
+                        uc_selector.reward(host_info.host()).await;
                         dotter
                             .dot(DotType::Http, ApiName::UcV4Query, true, begin_at.elapsed())
                             .await
@@ -391,7 +385,7 @@ async fn query_for_domains_without_cache(
                         return Ok(Some(response));
                     }
                     Err(err) => {
-                        let punished = uc_selector.punish(&host_info.host, &err, dotter).await;
+                        let punished = uc_selector.punish(host_info.host(), &err, dotter).await;
                         dotter
                             .dot(DotType::Http, ApiName::UcV4Query, false, begin_at.elapsed())
                             .await
@@ -410,8 +404,8 @@ async fn query_for_domains_without_cache(
 
 static CACHE_FILE_LOCK: AtomicLazy<Mutex<()>> = AtomicLazy::new(Default::default);
 
-const CACHE_FILE_NAME: &str = "query-cache.json";
-const CACHE_TEMPFILE_NAME: &str = "query-cache.tmp.json";
+pub(super) const CACHE_FILE_NAME: &str = "query-cache.json";
+pub(super) const CACHE_TEMPFILE_NAME: &str = "query-cache.tmp.json";
 
 async fn cache_map(force_reload: bool) -> IoResult<&'static CacheMap> {
     static CACHE_INIT: OnceCell<CacheMap> = OnceCell::const_new();
@@ -649,12 +643,12 @@ mod tests {
                 &["uc.qbox.me".to_owned()]
             );
             assert_eq!(
-                &querier
+                querier
                     .uc_selector
                     .select_host(&Default::default())
                     .await
                     .unwrap()
-                    .host,
+                    .host(),
                 "uc.qbox.me"
             );
             sleep(Duration::from_secs(5)).await;
