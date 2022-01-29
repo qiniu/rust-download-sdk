@@ -465,6 +465,16 @@ impl RangeReader {
             }
         }
     }
+
+    pub(super) fn base_timeout(&self) -> Duration {
+        self.inner.io_selector.base_timeout()
+    }
+
+    pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
+        self.inner
+            .io_selector
+            .increase_timeout_power_by(host, timeout_power)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -474,12 +484,12 @@ pub(crate) struct RangePart {
 }
 
 impl RangeReader {
-    pub(crate) async fn read_at<F: FnMut(&HostInfo)>(
+    pub(crate) async fn read_at<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         pos: u64,
         size: u64,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<Vec<u8>> {
         if size == 0 {
@@ -489,7 +499,7 @@ impl RangeReader {
             Method::GET,
             ApiName::RangeReaderReadAt,
             tries_info,
-            selected_hosts,
+            trying_hosts,
             on_host_selected,
             |tries, request_builder, req_id, download_url, host_info| {
                 async move {
@@ -549,11 +559,11 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn read_multi_ranges<F: FnMut(&HostInfo)>(
+    pub(crate) async fn read_multi_ranges<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         ranges: &[(u64, u64)],
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<Vec<RangePart>> {
         return self
@@ -561,7 +571,7 @@ impl RangeReader {
                 Method::GET,
                 ApiName::RangeReaderReadAt,
                 tries_info,
-                selected_hosts,
+                trying_hosts,
                 on_host_selected,
                 |tries, request_builder, req_id, download_url, host_info| async move {
                     debug!(
@@ -677,17 +687,17 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn exist<F: FnMut(&HostInfo)>(
+    pub(crate) async fn exist<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<bool> {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderExist,
             tries_info,
-            selected_hosts,
+            trying_hosts,
             on_host_selected,
             |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
@@ -731,17 +741,17 @@ impl RangeReader {
         .await
     }
 
-    pub(crate) async fn file_size<F: FnMut(&HostInfo)>(
+    pub(crate) async fn file_size<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<u64> {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderFileSize,
             tries_info,
-            selected_hosts,
+            trying_hosts,
             on_host_selected,
             |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
@@ -787,10 +797,10 @@ impl RangeReader {
         .await
     }
 
-    pub(crate) async fn download<F: FnMut(&HostInfo)>(
+    pub(crate) async fn download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<Vec<u8>> {
         let mut buf = Vec::new();
@@ -800,7 +810,7 @@ impl RangeReader {
                 Method::GET,
                 ApiName::RangeReaderDownloadTo,
                 tries_info,
-                selected_hosts,
+                trying_hosts,
                 on_host_selected,
                 move |tries, mut request_builder, req_id, download_url, host_info| {
                     let buf_cursor = buf_cursor.to_owned();
@@ -874,18 +884,18 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn read_last_bytes<F: FnMut(&HostInfo)>(
+    pub(crate) async fn read_last_bytes<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         size: u64,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<(Vec<u8>, u64)> {
         return   self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadLastBytes,
             tries_info,
-            selected_hosts,
+            trying_hosts,
             on_host_selected,
             move |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
@@ -942,13 +952,14 @@ impl RangeReader {
         T,
         F: FnMut(usize, HttpRequestBuilder, HeaderValue, Url, HostInfo) -> Fut,
         Fut: Future<Output = IoResult<T>>,
-        F2: FnMut(&HostInfo),
+        F2: FnMut(HostInfo) -> Fut2,
+        Fut2: Future<Output = ()>,
     >(
         &self,
         method: Method,
         api_name: ApiName,
         tries_info: TriesInfo<'_>,
-        selected_hosts: &Arc<Mutex<HashSet<String>>>,
+        trying_hosts: &TryingHosts,
         mut on_host_selected: F2,
         mut for_each_url: F,
     ) -> IoResult3<T> {
@@ -964,19 +975,19 @@ impl RangeReader {
             let last_try = tries_info.total_tries - tries <= 1;
 
             let chosen_io_info = {
-                let mut guard = selected_hosts.lock().await;
+                let mut guard = trying_hosts.lock().await;
                 if let Some(chosen) = self.inner.io_selector.select_host(&guard).await {
                     guard.insert(chosen.host().to_owned());
                     drop(guard);
-                    WrappedHostInfo {
+                    TryingHostInfo {
                         host_info: chosen,
-                        selected_hosts: selected_hosts.to_owned(),
+                        trying_hosts: trying_hosts.to_owned(),
                     }
                 } else {
                     return IoResult3::NoMoreTries(last_error);
                 }
             };
-            on_host_selected(&chosen_io_info);
+            on_host_selected(chosen_io_info.to_owned()).await;
             let download_url = sign_download_url_if_needed(
                 &make_download_url(
                     chosen_io_info.host(),
@@ -1111,6 +1122,7 @@ impl RangeReader {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Result3<T, E> {
     Ok(T),
     Err(E),
@@ -1128,12 +1140,14 @@ impl<T, E> From<Result<T, E>> for Result3<T, E> {
     }
 }
 
-struct WrappedHostInfo {
+pub(crate) type TryingHosts = Arc<Mutex<HashSet<String>>>;
+
+struct TryingHostInfo {
     host_info: HostInfo,
-    selected_hosts: Arc<Mutex<HashSet<String>>>,
+    trying_hosts: TryingHosts,
 }
 
-impl Deref for WrappedHostInfo {
+impl Deref for TryingHostInfo {
     type Target = HostInfo;
 
     fn deref(&self) -> &Self::Target {
@@ -1141,20 +1155,21 @@ impl Deref for WrappedHostInfo {
     }
 }
 
-impl Drop for WrappedHostInfo {
+impl Drop for TryingHostInfo {
     fn drop(&mut self) {
-        let host = take(self.host_info.host_mut());
-        if let Ok(mut selected_hosts) = self.selected_hosts.try_lock() {
-            selected_hosts.remove(&host);
+        if let Ok(mut trying_hosts) = self.trying_hosts.try_lock() {
+            trying_hosts.remove(self.host_info.host());
             return;
         }
-        let selected_hosts = take(&mut self.selected_hosts);
+        let trying_hosts = take(&mut self.trying_hosts);
+        let host_info = take(&mut self.host_info);
         spawn(async move {
-            selected_hosts.lock().await.remove(&host);
+            trying_hosts.lock().await.remove(host_info.host());
         });
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct TriesInfo<'a> {
     have_tried: &'a AtomicUsize,
     total_tries: usize,
@@ -1413,7 +1428,7 @@ mod tests {
                         6,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
-                        |_| {},
+                        |_| async {},
                     )
                     .await
                 {
@@ -1445,7 +1460,7 @@ mod tests {
                         12,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
-                        |_| {},
+                        |_| async {},
                     )
                     .await
                 {
@@ -1515,7 +1530,7 @@ mod tests {
                     5,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -1583,7 +1598,7 @@ mod tests {
                     5,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -1650,7 +1665,7 @@ mod tests {
                     10,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -1707,7 +1722,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .exist(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .exist(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(existed) => {
@@ -1718,7 +1737,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .file_size(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .file_size(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(file_size) => {
@@ -1729,7 +1752,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .download(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .download(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(buf) => {
@@ -1811,7 +1838,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .exist(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .exist(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1820,7 +1851,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .file_size(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .file_size(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1829,7 +1864,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .download(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .download(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1910,7 +1949,11 @@ mod tests {
             .await;
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .exist(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .exist(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1919,7 +1962,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .file_size(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .file_size(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1928,7 +1975,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .download(TriesInfo::new(&have_tried, 3), &Default::default(), |_| {})
+                .download(
+                    TriesInfo::new(&have_tried, 3),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Err(_) => {}
@@ -1960,7 +2011,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .exist(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .exist(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(existed) => {
@@ -1971,7 +2026,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .file_size(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .file_size(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(file_size) => {
@@ -1982,7 +2041,11 @@ mod tests {
 
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .download(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .download(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(buf) => {
@@ -2053,7 +2116,7 @@ mod tests {
                     &ranges,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -2103,7 +2166,7 @@ mod tests {
                     &ranges,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -2161,7 +2224,7 @@ mod tests {
                         &ranges,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
-                        |_| {},
+                        |_| async {},
                     )
                     .await
                 {
@@ -2191,7 +2254,7 @@ mod tests {
                         &ranges,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
-                        |_| {},
+                        |_| async {},
                     )
                     .await
                 {
@@ -2265,7 +2328,7 @@ mod tests {
                     &ranges,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -2316,7 +2379,7 @@ mod tests {
                     &ranges,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -2369,7 +2432,7 @@ mod tests {
                     &ranges,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
-                    |_| {},
+                    |_| async {},
                 )
                 .await
             {
@@ -2413,7 +2476,11 @@ mod tests {
             );
             let have_tried = AtomicUsize::new(0);
             match downloader
-                .download(TriesInfo::new(&have_tried, 1), &Default::default(), |_| {})
+                .download(
+                    TriesInfo::new(&have_tried, 1),
+                    &Default::default(),
+                    |_| async {},
+                )
                 .await
             {
                 Result3::Ok(buf) => {

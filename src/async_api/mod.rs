@@ -18,3 +18,5 @@ pub(crate) use download::{
     sign_download_url_with_deadline, sign_download_url_with_lifetime, RangePart, RangeReader,
     RangeReaderBuilder, RangeReaderInner,
 };
+
+mod retrier;

@@ -629,6 +629,11 @@ impl HostSelector {
     }
 
     #[inline]
+    pub(super) fn base_timeout(&self) -> Duration {
+        self.host_punisher.base_timeout
+    }
+
+    #[inline]
     fn is_satisfied_with(&self, punished_info: &PunishedInfo) -> bool {
         self.host_punisher.is_available(punished_info)
             && self.hosts_updater.current_timeout_power.load(Relaxed) >= punished_info.timeout_power
@@ -641,7 +646,7 @@ pub(super) enum PunishResult {
     PunishedAndFreezed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct HostInfo {
     host: String,
     timeout_power: usize,
@@ -659,18 +664,6 @@ impl HostInfo {
 
     pub(crate) fn timeout(&self) -> Duration {
         self.timeout
-    }
-
-    pub(crate) fn host_mut(&mut self) -> &mut String {
-        &mut self.host
-    }
-
-    pub(crate) fn timeout_power_mut(&mut self) -> &mut usize {
-        &mut self.timeout_power
-    }
-
-    pub(crate) fn timeout_mut(&mut self) -> &mut Duration {
-        &mut self.timeout
     }
 }
 

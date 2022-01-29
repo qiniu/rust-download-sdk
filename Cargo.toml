@@ -40,6 +40,7 @@ atomic_once_cell = "0.1.2"
 futures = "0.3.19"
 mime = "0.3.16"
 multer = "2.0.2"
+async-trait = "0.1.52"
 
 [dev-dependencies]
 warp = { version = "0.3.2", default-features = false, features = ["multipart"] }
