@@ -25,9 +25,9 @@ pub fn total_download_duration(t: SystemTime) -> Duration {
     Duration::from_millis(end_time - START_TIME.load(Relaxed))
 }
 
-pub(super) const REQUEST_ID_HEADER: &str = "X-ReqId";
+pub(crate) const REQUEST_ID_HEADER: &str = "X-ReqId";
 
-pub(super) fn get_req_id(tn: SystemTime, index: usize) -> HeaderValue {
+pub(crate) fn get_req_id(tn: SystemTime, index: usize) -> HeaderValue {
     let start_time: u64 = START_TIME.load(Relaxed);
     let end_time: u128 = tn.duration_since(UNIX_EPOCH).map_or(0, |n| n.as_nanos());
     let delta: u128 = end_time - u128::from(start_time) * 1000 * 1000;

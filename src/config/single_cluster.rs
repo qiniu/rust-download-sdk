@@ -1,5 +1,5 @@
 use super::{
-    super::{async_api::RangeReaderInner as AsyncRangeReaderInner, download::RangeReaderInner},
+    super::{async_api::RangeReaderInner as AsyncRangeReaderInner, sync_api::RangeReaderInner},
     ClustersConfigParseError, Timeouts,
 };
 use once_cell::sync::OnceCell;

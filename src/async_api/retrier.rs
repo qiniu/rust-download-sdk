@@ -4,27 +4,17 @@ use super::{
     RangePart,
 };
 use async_trait::async_trait;
-use futures::{
-    future::{join_all, select, select_all, BoxFuture, Either},
-    FutureExt,
-};
+use futures::future::{join_all, select, select_all, BoxFuture, Either};
 use std::{
-    collections::HashSet,
     future::Future,
-    io::{Error as IoError, Result as IoResult},
+    io::Error as IoError,
     mem::take,
-    ops::{Deref, DerefMut},
     pin::Pin,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::Arc,
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{
-    pin,
-    sync::Mutex,
-    time::Instant,
-    time::{sleep, sleep_until},
-};
+use tokio::{pin, sync::Mutex, time::sleep_until, time::Instant};
 
 #[async_trait]
 pub(super) trait MayBeTimeout {
@@ -452,8 +442,8 @@ async fn set_selected_info(selected_info: &SelectedHostInfo, host: HostInfo) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use futures::{pin_mut, ready};
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    use futures::ready;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
     use tokio::time::{sleep, Sleep};
 
     struct FakedRetrier<T> {

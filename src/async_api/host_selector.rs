@@ -1,26 +1,22 @@
 use super::dot::Dotter;
 use dashmap::DashMap;
-use futures::{future::BoxFuture, ready};
+use futures::future::BoxFuture;
 use log::info;
 use rand::{seq::SliceRandom, thread_rng};
-use reqwest::Error as ReqwestError;
 use std::{
     cmp::{min, Ordering},
     collections::HashSet,
     fmt::{Debug, Formatter, Result as FormatResult},
-    io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult},
+    io::{Error as IoError, Result as IoResult},
     ops::Deref,
-    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc,
     },
-    task::{Context, Poll},
     time::{Duration, Instant},
 };
 use tap::prelude::*;
 use tokio::{
-    io::{AsyncRead, ReadBuf},
     spawn,
     sync::{Mutex, RwLock},
 };
@@ -669,9 +665,10 @@ impl HostInfo {
 
 #[cfg(test)]
 mod tests {
+    use tokio::time::sleep;
+
     use super::*;
-    use tokio::{spawn, sync::oneshot::channel, time::sleep};
-    use warp::{hyper::Body, path, reply::Response, Filter};
+    use std::io::ErrorKind as IoErrorKind;
 
     #[tokio::test]
     async fn test_hosts_updater() {

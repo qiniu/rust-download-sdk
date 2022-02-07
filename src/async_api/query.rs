@@ -4,7 +4,7 @@ use super::{
     host_selector::{HostInfo, HostSelector},
 };
 use atomic_once_cell::AtomicLazy;
-use futures::{TryFutureExt, TryStreamExt};
+use futures::TryFutureExt;
 use log::{info, warn};
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::{
@@ -18,7 +18,6 @@ use std::{
     future::Future,
     io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult},
     path::Path,
-    pin::Pin,
     sync::Arc,
     time::{Duration, Instant, SystemTime},
 };

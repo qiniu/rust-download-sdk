@@ -1,6 +1,11 @@
 use super::{
-    base::{credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token},
-    cache_dir_path_of,
+    super::{
+        async_api::{is_dot_uploading_disabled, is_dotting_disabled},
+        base::{
+            credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token,
+        },
+    },
+    cache_dir::cache_dir_path_of,
     host_selector::{HostSelector, PunishResult},
 };
 use dashmap::DashMap;
@@ -19,55 +24,12 @@ use std::{
         SeekFrom, Write,
     },
     ops::Deref,
-    sync::{
-        atomic::{AtomicBool, Ordering::Relaxed},
-        Arc, Mutex,
-    },
+    sync::{Arc, Mutex},
     thread::Builder as ThreadBuilder,
     time::{Duration, Instant, SystemTime},
     u128,
 };
 use tap::prelude::*;
-
-static DOTTING_DISABLED: AtomicBool = AtomicBool::new(false);
-
-/// 禁止打点功能
-#[inline]
-pub fn disable_dotting() {
-    DOTTING_DISABLED.store(true, Relaxed)
-}
-
-/// 启用打点功能
-#[inline]
-pub fn enable_dotting() {
-    DOTTING_DISABLED.store(false, Relaxed)
-}
-
-/// 打点功能是否启用
-#[inline]
-pub fn is_dotting_disabled() -> bool {
-    DOTTING_DISABLED.load(Relaxed)
-}
-
-static DOT_UPLOADING_DISABLED: AtomicBool = AtomicBool::new(false);
-
-/// 禁止打点上传功能
-#[inline]
-pub fn disable_dot_uploading() {
-    DOT_UPLOADING_DISABLED.store(true, Relaxed)
-}
-
-/// 启用打点上传功能
-#[inline]
-pub fn enable_dot_uploading() {
-    DOT_UPLOADING_DISABLED.store(false, Relaxed)
-}
-
-/// 打点上传功能是否启用
-#[inline]
-pub fn is_dot_uploading_disabled() -> bool {
-    DOT_UPLOADING_DISABLED.load(Relaxed)
-}
 
 #[derive(Copy, Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[serde(rename_all = "lowercase")]
@@ -782,7 +744,11 @@ mod tests {
     use crate::config::Timeouts;
     use futures::channel::oneshot::channel;
     use rayon::ThreadPoolBuilder;
-    use std::{error::Error, sync::atomic::AtomicUsize, thread::sleep};
+    use std::{
+        error::Error,
+        sync::atomic::{AtomicUsize, Ordering::Relaxed},
+        thread::sleep,
+    };
     use tokio::task::{spawn, spawn_blocking};
     use warp::{http::HeaderValue, hyper::Body, path, reply::Response, Filter};
 
@@ -805,7 +771,8 @@ mod tests {
     const BUCKET_NAME: &str = "test-bucket";
 
     mod guard {
-        use super::{disable_dotting, enable_dotting, is_dotting_disabled};
+        use crate::async_api::{disable_dotting, enable_dotting, is_dotting_disabled};
+
         pub(super) struct DottingDisableGuard {
             enabled_before: bool,
         }

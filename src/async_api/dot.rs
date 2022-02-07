@@ -6,13 +6,13 @@ use super::{
     host_selector::{HostInfo, HostSelector, PunishResult},
 };
 use dashmap::DashMap;
-use fd_lock::{RwLock as FdRwLock, RwLockWriteGuard as FdRwLockWriteGuard};
+use fd_lock::RwLock as FdRwLock;
 use log::{debug, info, warn};
 use reqwest::{header::AUTHORIZATION, Client as HttpClient, StatusCode};
 use serde::{de::Error as DeserializeError, Deserialize, Serialize};
 use serde_json::Value as JSONValue;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     convert::TryFrom,
     fmt,
     future::Future,
@@ -30,8 +30,7 @@ use tokio::{
     fs::{File, OpenOptions},
     io::{AsyncBufReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
     spawn,
-    sync::{Mutex, MutexGuard},
-    task::spawn_blocking,
+    sync::Mutex,
 };
 
 static DOTTING_DISABLED: AtomicBool = AtomicBool::new(false);
@@ -821,13 +820,8 @@ mod tests {
     use crate::config::Timeouts;
     use futures::channel::oneshot::channel;
     use futures::future::join_all;
-    use rayon::ThreadPoolBuilder;
     use std::{error::Error, sync::atomic::AtomicUsize};
-    use tokio::{
-        fs::remove_file,
-        task::{spawn, spawn_blocking},
-        time::sleep,
-    };
+    use tokio::{fs::remove_file, task::spawn, time::sleep};
     use warp::{http::HeaderValue, hyper::Body, path, reply::Response, Filter};
 
     macro_rules! starts_with_server {

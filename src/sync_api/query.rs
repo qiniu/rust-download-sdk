@@ -1,5 +1,5 @@
 use super::{
-    cache_dir_path_of,
+    cache_dir::cache_dir_path_of,
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
 };
@@ -457,8 +457,7 @@ fn parse_url_protocol(url: &str) -> Option<bool> {
 mod tests {
     use super::{
         super::{
-            base::credential::Credential,
-            config::Timeouts,
+            super::{base::credential::Credential, config::Timeouts},
             dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,

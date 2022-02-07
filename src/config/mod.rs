@@ -15,7 +15,7 @@ pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClust
 
 use super::{
     async_api::RangeReaderBuilder as AsyncRangeReaderBuilder, base::credential::Credential,
-    download::RangeReaderBuilder,
+    sync_api::RangeReaderBuilder,
 };
 use log::{error, info, warn};
 use static_vars::qiniu_config;
@@ -348,7 +348,7 @@ pub(super) fn build_async_range_reader_builder_from_env(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::download::RangeReader, static_vars::reset_static_vars, *};
+    use super::{super::sync_api::RangeReader, static_vars::reset_static_vars, *};
     use anyhow::Result;
     use std::{
         collections::HashMap,

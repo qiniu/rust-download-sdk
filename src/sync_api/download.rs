@@ -1,8 +1,11 @@
 use super::{
-    base::credential::Credential,
-    config::{
-        build_range_reader_builder_from_config, build_range_reader_builder_from_env,
-        with_current_qiniu_config, Config, Timeouts,
+    super::{
+        async_api::sign_download_url_with_lifetime,
+        base::credential::Credential,
+        config::{
+            build_range_reader_builder_from_config, build_range_reader_builder_from_env,
+            with_current_qiniu_config, Config, Timeouts,
+        },
     },
     dot::{ApiName, DotType, Dotter},
     host_selector::{HostSelector, HostSelectorBuilder},
@@ -27,53 +30,11 @@ use std::{
     result::Result,
     sync::Arc,
     thread::sleep,
-    time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime},
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
 use url::Url;
-
-/// 为私有空间签发对象下载 URL
-/// # Arguments
-///
-/// * `c` - 私有空间所在账户的凭证
-/// * `url` - 对象下载 URL
-/// * `deadline` - 下载 URL 有效截止时间
-pub fn sign_download_url_with_deadline(
-    c: &Credential,
-    url: Url,
-    deadline: SystemTime,
-) -> Result<String, SystemTimeError> {
-    let mut signed_url = url.to_string();
-
-    if signed_url.contains('?') {
-        signed_url.push_str("&e=");
-    } else {
-        signed_url.push_str("?e=");
-    }
-
-    let deadline = deadline.duration_since(UNIX_EPOCH)?.as_secs().to_string();
-    signed_url.push_str(&deadline);
-    let signature = c.sign(signed_url.as_bytes());
-    signed_url.push_str("&token=");
-    signed_url.push_str(&signature);
-    Ok(signed_url)
-}
-
-/// 为私有空间签发对象下载 URL
-/// # Arguments
-///
-/// * `c` - 私有空间所在账户的凭证
-/// * `url` - 对象下载 URL
-/// * `lifetime` - 下载 URL 有效期
-pub fn sign_download_url_with_lifetime(
-    c: &Credential,
-    url: Url,
-    lifetime: Duration,
-) -> Result<String, SystemTimeError> {
-    let deadline = SystemTime::now() + lifetime;
-    sign_download_url_with_deadline(c, url, deadline)
-}
 
 /// 对象范围下载器
 #[derive(Debug)]
@@ -83,7 +44,7 @@ pub struct RangeReader {
 }
 
 #[derive(Debug)]
-pub(super) struct RangeReaderInner {
+pub(crate) struct RangeReaderInner {
     io_selector: HostSelector,
     dotter: Dotter,
     credential: Credential,
@@ -1227,7 +1188,7 @@ fn parse_range_header(range: &str) -> Result<(u64, u64, u64), TextIOError> {
 mod tests {
     use super::{
         super::{
-            cache_dir_path_of,
+            cache_dir::cache_dir_path_of,
             dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,
@@ -2076,22 +2037,6 @@ mod tests {
             })
             .await?;
         });
-        Ok(())
-    }
-
-    #[test]
-    fn test_sign_download_url_with_deadline() -> Result<(), Box<dyn Error>> {
-        env_logger::try_init().ok();
-        clear_cache()?;
-
-        let credential = Credential::new("abcdefghklmnopq", "1234567890");
-        assert_eq!(
-            sign_download_url_with_deadline(&credential,
-                Url::parse("http://www.qiniu.com/?go=1")?,
-                SystemTime::UNIX_EPOCH + Duration::from_secs(1_234_567_890 + 3600),
-            )?,
-            "http://www.qiniu.com/?go=1&e=1234571490&token=abcdefghklmnopq:KjQtlGAkEOhSwtFjJfYtYa2-reE=",
-        );
         Ok(())
     }
 

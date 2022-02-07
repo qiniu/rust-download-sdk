@@ -15,7 +15,7 @@ use super::{
 };
 use futures::{future::OptionFuture, AsyncReadExt, TryStreamExt};
 use hyper::HeaderMap;
-use log::{debug, error, info, warn};
+use log::{debug, info, warn};
 use mime::{Mime, BOUNDARY};
 use multer::Multipart;
 use reqwest::{
@@ -27,28 +27,32 @@ use std::{
     collections::HashSet,
     error::Error as StdError,
     future::Future,
-    io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Read, Result as IoResult, SeekFrom},
+    io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Result as IoResult},
     mem::take,
     ops::Deref,
-    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc,
     },
-    task::{Context, Poll},
     time::{Duration, Instant, SystemTime, SystemTimeError, UNIX_EPOCH},
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIoError};
 use tokio::{
-    io::{copy as io_copy, AsyncRead, AsyncSeek, AsyncSeekExt, AsyncWrite, ReadBuf},
+    io::{copy as io_copy, AsyncWrite},
     spawn,
     sync::Mutex,
 };
 use tokio_util::{compat::FuturesAsyncReadCompatExt, either::Either};
 use url::Url;
 
-pub(crate) fn sign_download_url_with_deadline(
+/// 为私有空间签发对象下载 URL
+/// # Arguments
+///
+/// * `c` - 私有空间所在账户的凭证
+/// * `url` - 对象下载 URL
+/// * `deadline` - 下载 URL 有效截止时间
+pub fn sign_download_url_with_deadline(
     c: &Credential,
     url: Url,
     deadline: SystemTime,
@@ -69,7 +73,13 @@ pub(crate) fn sign_download_url_with_deadline(
     Ok(signed_url)
 }
 
-pub(crate) fn sign_download_url_with_lifetime(
+/// 为私有空间签发对象下载 URL
+/// # Arguments
+///
+/// * `c` - 私有空间所在账户的凭证
+/// * `url` - 对象下载 URL
+/// * `lifetime` - 下载 URL 有效期
+pub fn sign_download_url_with_lifetime(
     c: &Credential,
     url: Url,
     lifetime: Duration,
@@ -1273,20 +1283,13 @@ mod tests {
     use multipart::client::lazy::Multipart as LazyMultipart;
     use serde_json::{json, to_vec as json_to_vec};
     use std::{
-        boxed::Box,
-        error::Error,
         io::Read,
-        result::Result,
         sync::{
             atomic::{AtomicUsize, Ordering::Relaxed},
             Arc,
         },
     };
-    use tokio::{
-        fs::remove_file,
-        task::{spawn, spawn_blocking},
-        time::sleep,
-    };
+    use tokio::{fs::remove_file, task::spawn, time::sleep};
     use warp::{
         header,
         http::{header::AUTHORIZATION, HeaderValue, StatusCode},
