@@ -5,7 +5,8 @@ use super::{
         base::credential::Credential,
         config::{
             build_async_range_reader_builder_from_config,
-            build_async_range_reader_builder_from_env, with_current_qiniu_config, Config, Timeouts,
+            build_async_range_reader_builder_from_env_with_extra_options,
+            with_current_qiniu_config, Config, Timeouts,
         },
     },
     dot::{ApiName, DotType, Dotter},
@@ -13,7 +14,8 @@ use super::{
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
 };
-use futures::{future::OptionFuture, AsyncReadExt, TryStreamExt};
+use async_once_cell::Lazy;
+use futures::{AsyncReadExt, TryStreamExt};
 use hyper::HeaderMap;
 use log::{debug, info, warn};
 use mime::{Mime, BOUNDARY};
@@ -26,6 +28,7 @@ use reqwest::{
 use std::{
     collections::HashSet,
     error::Error as StdError,
+    fmt::{self, Debug},
     future::Future,
     io::{Cursor, Error as IoError, ErrorKind as IoErrorKind, Result as IoResult},
     mem::take,
@@ -88,27 +91,10 @@ pub fn sign_download_url_with_lifetime(
     sign_download_url_with_deadline(c, url, deadline)
 }
 
-#[derive(Debug)]
-pub(crate) struct RangeReader {
-    inner: Arc<RangeReaderInner>,
-    key: String,
-}
+// TODO: 重新考虑下是否应该是 pub(crate)
 
 #[derive(Debug)]
-pub(crate) struct RangeReaderInner {
-    io_selector: HostSelector,
-    dotter: Dotter,
-    credential: Credential,
-    http_client: Arc<HttpClient>,
-    bucket: String,
-    use_getfile_api: bool,
-    normalize_key: bool,
-    use_https: bool,
-    private_url_lifetime: Option<Duration>,
-}
-
-#[derive(Debug)]
-pub(crate) struct RangeReaderBuilder {
+pub(crate) struct AsyncRangeReaderBuilder {
     credential: Credential,
     bucket: String,
     key: String,
@@ -131,8 +117,7 @@ pub(crate) struct RangeReaderBuilder {
     max_dot_buffer_size: Option<u64>,
 }
 
-impl RangeReaderBuilder {
-    #[inline]
+impl AsyncRangeReaderBuilder {
     pub(crate) fn new(
         bucket: String,
         key: String,
@@ -163,109 +148,93 @@ impl RangeReaderBuilder {
         }
     }
 
-    #[inline]
     pub(crate) fn uc_urls(mut self, urls: Vec<String>) -> Self {
         self.uc_urls = urls;
         self
     }
 
-    #[inline]
     pub(crate) fn monitor_urls(mut self, urls: Vec<String>) -> Self {
         self.monitor_urls = urls;
         self
     }
 
-    #[inline]
     pub(crate) fn uc_tries(mut self, tries: usize) -> Self {
         self.uc_tries = tries;
         self
     }
 
-    #[inline]
     pub(crate) fn dot_tries(mut self, tries: usize) -> Self {
         self.dot_tries = Some(tries);
         self
     }
 
-    #[inline]
     pub(crate) fn update_interval(mut self, interval: Duration) -> Self {
         self.update_interval = Some(interval);
         self
     }
 
-    #[inline]
     pub(crate) fn punish_duration(mut self, duration: Duration) -> Self {
         self.punish_duration = Some(duration);
         self
     }
 
-    #[inline]
     pub(crate) fn base_timeout(mut self, timeout: Duration) -> Self {
         self.base_timeout = Some(timeout);
         self
     }
 
-    #[inline]
     pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.dial_timeout = Some(timeout);
         self
     }
 
-    #[inline]
     pub(crate) fn max_punished_times(mut self, max_times: usize) -> Self {
         self.max_punished_times = Some(max_times);
         self
     }
 
-    #[inline]
     pub(crate) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
         self.max_punished_hosts_percent = Some(percent);
         self
     }
 
-    #[inline]
     pub(crate) fn use_getfile_api(mut self, use_getfile_api: bool) -> Self {
         self.use_getfile_api = use_getfile_api;
         self
     }
 
-    #[inline]
     pub(crate) fn normalize_key(mut self, normalize_key: bool) -> Self {
         self.normalize_key = normalize_key;
         self
     }
 
-    #[inline]
     pub(crate) fn private_url_lifetime(mut self, private_url_lifetime: Option<Duration>) -> Self {
         self.private_url_lifetime = private_url_lifetime;
         self
     }
 
-    #[inline]
     pub(crate) fn dot_interval(mut self, dot_interval: Duration) -> Self {
         self.dot_interval = Some(dot_interval);
         self
     }
 
-    #[inline]
     pub(crate) fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
         self.max_dot_buffer_size = Some(max_dot_buffer_size);
         self
     }
 
-    #[inline]
     pub(crate) fn use_https(mut self, use_https: bool) -> Self {
         self.use_https = use_https;
         self
     }
 
-    #[inline]
-    pub(crate) async fn build(self) -> RangeReader {
-        let (inner, key) = self.build_inner_and_key().await;
-        RangeReader { inner, key }
+    pub(crate) fn build(self) -> AsyncRangeReader {
+        AsyncRangeReader(Arc::new(Lazy::new(Box::pin(async move {
+            self.build_inner_and_key().await
+        }))))
     }
 
-    async fn build_inner_and_key(self) -> (Arc<RangeReaderInner>, String) {
+    async fn build_inner_and_key(self) -> (Arc<AsyncRangeReaderInner>, String) {
         let http_client = Timeouts::new(self.base_timeout, self.dial_timeout).async_http_client();
         let dotter = Dotter::new(
             http_client.to_owned(),
@@ -311,7 +280,7 @@ impl RangeReaderBuilder {
         .await;
 
         return (
-            Arc::new(RangeReaderInner {
+            Arc::new(AsyncRangeReaderInner {
                 io_selector,
                 dotter,
                 http_client,
@@ -335,7 +304,6 @@ impl RangeReaderBuilder {
         }
 
         impl HostSelectorParams {
-            #[inline]
             fn set_builder(&self, mut builder: HostSelectorBuilder) -> HostSelectorBuilder {
                 if let Some(update_interval) = self.update_interval {
                     builder = builder.update_interval(update_interval);
@@ -356,7 +324,6 @@ impl RangeReaderBuilder {
             }
         }
 
-        #[inline]
         async fn make_uc_host_selector(
             uc_urls: Vec<String>,
             params: &HostSelectorParams,
@@ -367,7 +334,6 @@ impl RangeReaderBuilder {
                 .await
         }
 
-        #[inline]
         async fn make_io_selector(
             io_urls: Vec<String>,
             io_querier: Option<HostsQuerier>,
@@ -399,72 +365,103 @@ impl RangeReaderBuilder {
         }
     }
 
-    #[inline]
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
         build_async_range_reader_builder_from_config(key, config)
     }
 
-    #[inline]
-    pub(crate) fn from_env(key: String) -> Option<Self> {
-        build_async_range_reader_builder_from_env(key, false)
+    pub(crate) fn from_env_with_extra_items(
+        key: String,
+    ) -> Option<(Self, Option<usize>, Option<usize>)> {
+        build_async_range_reader_builder_from_env_with_extra_options(key, false)
     }
 }
 
-impl RangeReader {
-    #[inline]
-    pub(crate) fn builder(
+#[derive(Clone)]
+pub(crate) struct AsyncRangeReader(Arc<Lazy<(Arc<AsyncRangeReaderInner>, String)>>);
+
+// TODO: 重新考虑下是否应该是 pub(crate)
+
+#[derive(Debug)]
+pub(crate) struct AsyncRangeReaderInner {
+    io_selector: HostSelector,
+    dotter: Dotter,
+    credential: Credential,
+    http_client: Arc<HttpClient>,
+    bucket: String,
+    use_getfile_api: bool,
+    normalize_key: bool,
+    use_https: bool,
+    private_url_lifetime: Option<Duration>,
+}
+
+impl AsyncRangeReader {
+    pub(super) fn builder(
         bucket: String,
         key: String,
         credential: Credential,
         io_urls: Vec<String>,
-    ) -> RangeReaderBuilder {
-        RangeReaderBuilder::new(bucket, key, credential, io_urls)
+    ) -> AsyncRangeReaderBuilder {
+        AsyncRangeReaderBuilder::new(bucket, key, credential, io_urls)
     }
 
-    #[inline]
-    pub(crate) async fn from_config(key: String, config: &Config) -> Self {
-        RangeReaderBuilder::from_config(key, config).build().await
+    pub(super) fn from_config(key: String, config: &Config) -> Self {
+        AsyncRangeReaderBuilder::from_config(key, config).build()
     }
 
-    #[inline]
-    pub(crate) async fn from_env(key: String) -> Option<Self> {
-        let fut: OptionFuture<_> = with_current_qiniu_config(|config| {
+    pub(super) fn from_env_with_extra_items(
+        key: String,
+    ) -> Option<(Self, Option<usize>, Option<usize>)> {
+        with_current_qiniu_config(|config| {
             config.and_then(|config| {
                 config.with_key(&key.to_owned(), |config| {
                     let config = Arc::new(config.to_owned());
                     let range_reader_config = config.to_owned();
-                    async move {
-                        config
-                            .get_or_init_async_range_reader_inner(move || async move {
-                                RangeReaderBuilder::from_config(String::new(), &range_reader_config)
-                                    .build_inner_and_key()
-                                    .await
-                                    .0
-                            })
-                            .await
-                    }
+                    (
+                        config.max_retry_concurrency(),
+                        config.retry(),
+                        Box::pin(async move {
+                            (
+                                config
+                                    .get_or_init_async_range_reader_inner(move || async move {
+                                        AsyncRangeReaderBuilder::from_config(
+                                            String::new(),
+                                            &range_reader_config,
+                                        )
+                                        .build_inner_and_key()
+                                        .await
+                                        .0
+                                    })
+                                    .await,
+                                key,
+                            )
+                        }),
+                    )
                 })
             })
         })
-        .into();
-        fut.await.map(|inner| Self { inner, key })
+        .map(|(max_retry_concurrency, total_tries, fut)| {
+            (
+                Self(Arc::new(Lazy::new(fut))),
+                max_retry_concurrency,
+                total_tries,
+            )
+        })
     }
 
-    pub(crate) async fn update_urls(&self) -> bool {
-        self.inner.io_selector.update_hosts().await
+    pub(super) async fn update_urls(&self) -> bool {
+        self.inner().await.io_selector.update_hosts().await
     }
 
-    pub(crate) async fn io_urls(&self) -> Vec<String> {
-        return self
-            .inner
+    pub(super) async fn io_urls(&self) -> Vec<String> {
+        let inner = self.inner().await;
+        return inner
             .io_selector
             .hosts()
             .await
             .iter()
-            .map(|host| normalize_host(host, self.inner.use_https))
+            .map(|host| normalize_host(host, inner.use_https))
             .collect();
 
-        #[inline]
         fn normalize_host(host: &str, use_https: bool) -> String {
             if host.contains("://") {
                 host.to_string()
@@ -476,28 +473,22 @@ impl RangeReader {
         }
     }
 
-    pub(super) fn base_timeout(&self) -> Duration {
-        self.inner.io_selector.base_timeout()
+    pub(super) async fn base_timeout(&self) -> Duration {
+        self.inner().await.io_selector.base_timeout()
     }
 
-    pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
-        self.inner
+    pub(super) async fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
+        self.inner()
+            .await
             .io_selector
             .increase_timeout_power_by(host, timeout_power)
     }
-}
 
-#[derive(Debug, Clone)]
-pub(crate) struct RangePart {
-    pub(crate) data: Vec<u8>,
-    pub(crate) range: (u64, u64),
-}
-
-impl RangeReader {
-    pub(crate) async fn read_at<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn read_at<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         pos: u64,
         size: u64,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -505,7 +496,7 @@ impl RangeReader {
         if size == 0 {
             return Ok(Default::default()).into();
         }
-        return  self.with_retries(
+        return self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadAt,
             tries_info,
@@ -515,17 +506,18 @@ impl RangeReader {
                 async move {
                     let range = generate_range_header(pos, size);
                     debug!(
-                        "[{}] read_at url: {}, req_id: {:?}, range: {}",
-                        tries, download_url, req_id, &range
+                        "{{{}}} [{}] read_at url: {}, req_id: {:?}, range: {}",
+                        async_task_id, tries, download_url, req_id, &range
                     );
                     let begin_at = Instant::now();
                     let result = request_builder
                         .header(RANGE, &range)
                         .send()
-                        .await
-                        .tap_err(|err| {
-                            self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
-                        })
+                        .await;
+                        if let Err(err) = &result {
+                            self.punish_if_needed(host_info.host(), host_info.timeout_power(), err).await;
+                        }
+                    let result = result
                         .map_err(io_error_from(IoErrorKind::ConnectionAborted))
                         .and_then(|resp| {
                             if resp.status() != StatusCode::PARTIAL_CONTENT && resp.status() != StatusCode::OK {
@@ -545,7 +537,8 @@ impl RangeReader {
                     }
                         .tap_ok(|_| {
                             info!(
-                                "[{}] read_at ok url: {}, range: {}, req_id: {:?}, elapsed: {:?}",
+                                "{{{}}} [{}] read_at ok url: {}, range: {}, req_id: {:?}, elapsed: {:?}",
+                                async_task_id,
                                 tries,
                                 download_url,
                                 range,
@@ -555,8 +548,8 @@ impl RangeReader {
                         })
                         .tap_err(|err| {
                             warn!(
-                                "[{}] read_at error url: {}, range: {}, error: {}, req_id: {:?}, elapsed: {:?}",
-                                tries, download_url, range, err, req_id, begin_at.elapsed(),
+                                "{{{}}} [{}] read_at error url: {}, range: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                                async_task_id, tries, download_url, range, err, req_id, begin_at.elapsed(),
                             );
                         })
                 }
@@ -569,9 +562,10 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn read_multi_ranges<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn read_multi_ranges<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         ranges: &[(u64, u64)],
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -585,7 +579,8 @@ impl RangeReader {
                 on_host_selected,
                 |tries, request_builder, req_id, download_url, host_info| async move {
                     debug!(
-                        "[{}] read_multi_ranges url: {}, req_id: {:?}, range counts: {}",
+                        "{{{}}} [{}] read_multi_ranges url: {}, req_id: {:?}, range counts: {}",
+                        async_task_id,
                         tries,
                         download_url,
                         req_id,
@@ -596,11 +591,11 @@ impl RangeReader {
                     let result = request_builder
                         .header(RANGE, &range)
                         .send()
-                        .await
-                        .tap_err(|err| {
-                            self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
-                        })
-                        .map_err(io_error_from(IoErrorKind::ConnectionAborted));
+                        .await;
+                    if let Err(err) = &result {
+                        self.punish_if_needed(host_info.host(), host_info.timeout_power(), err).await;
+                    }
+                    let result = result.map_err(io_error_from(IoErrorKind::ConnectionAborted));
                     match result {
                         Ok(resp) => {
                             let mut parts = Vec::with_capacity(ranges.len());
@@ -669,14 +664,14 @@ impl RangeReader {
                     }
                     .tap_ok(|_| {
                         info!(
-                            "[{}] read_multi_ranges ok url: {}, req_id: {:?}, elapsed: {:?}",
-                            tries, download_url, req_id, begin_at.elapsed(),
+                            "{{{}}} [{}] read_multi_ranges ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id, tries, download_url, req_id, begin_at.elapsed(),
                         );
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] read_multi_ranges error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
-                            tries, download_url, err, req_id, begin_at.elapsed(),
+                            "{{{}}} [{}] read_multi_ranges error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id, tries, download_url, err, req_id, begin_at.elapsed(),
                         );
                     })
                 },
@@ -697,8 +692,9 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn exist<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn exist<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -711,16 +707,16 @@ impl RangeReader {
             on_host_selected,
             |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
-                    "[{}] exist url: {}, req_id: {:?}",
-                    tries, download_url, req_id
+                    "{{{}}} [{}] exist url: {}, req_id: {:?}",
+                    async_task_id, tries, download_url, req_id
                 );
                 let begin_at = Instant::now();
-                request_builder
-                    .send()
-                    .await
-                    .tap_err(|err| {
-                        self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
-                    })
+                let result = request_builder.send().await;
+                if let Err(err) = &result {
+                    self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
+                        .await;
+                }
+                result
                     .map_err(io_error_from(IoErrorKind::ConnectionAborted))
                     .and_then(|resp| match resp.status() {
                         StatusCode::OK => Ok(true),
@@ -729,7 +725,8 @@ impl RangeReader {
                     })
                     .tap_ok(|_| {
                         info!(
-                            "[{}] exist ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            "{{{}}} [{}] exist ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id,
                             tries,
                             download_url,
                             req_id,
@@ -738,7 +735,8 @@ impl RangeReader {
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] exist error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            "{{{}}} [{}] exist error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id,
                             tries,
                             download_url,
                             err,
@@ -751,8 +749,9 @@ impl RangeReader {
         .await
     }
 
-    pub(crate) async fn file_size<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn file_size<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -765,16 +764,16 @@ impl RangeReader {
             on_host_selected,
             |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
-                    "[{}] file_size url: {}, req_id: {:?}",
-                    tries, download_url, req_id
+                    "{{{}}} [{}] file_size url: {}, req_id: {:?}",
+                    async_task_id, tries, download_url, req_id
                 );
                 let begin_at = Instant::now();
-                request_builder
-                    .send()
-                    .await
-                    .tap_err(|err| {
-                        self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
-                    })
+                let result = request_builder.send().await;
+                if let Err(err) = &result {
+                    self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
+                        .await;
+                }
+                result
                     .map_err(io_error_from(IoErrorKind::ConnectionAborted))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::OK {
@@ -785,7 +784,8 @@ impl RangeReader {
                     })
                     .tap_ok(|_| {
                         info!(
-                            "[{}] file_size ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            "{{{}}} [{}] file_size ok url: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id,
                             tries,
                             download_url,
                             req_id,
@@ -794,7 +794,8 @@ impl RangeReader {
                     })
                     .tap_err(|err| {
                         warn!(
-                            "[{}] file_size error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            "{{{}}} [{}] file_size error url: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                            async_task_id,
                             tries,
                             download_url,
                             err,
@@ -807,8 +808,9 @@ impl RangeReader {
         .await
     }
 
-    pub(crate) async fn download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -828,8 +830,8 @@ impl RangeReader {
                         let mut buf_cursor = buf_cursor.lock().await;
                         let start_from = buf_cursor.position() as u64;
                         debug!(
-                            "[{}] download_to url: {}, req_id: {:?}, start_from: {}",
-                            tries, download_url, req_id, start_from
+                            "{{{}}} [{}] download_to url: {}, req_id: {:?}, start_from: {}",
+                            async_task_id, tries, download_url, req_id, start_from
                         );
                         let begin_at = Instant::now();
                         if start_from > 0 {
@@ -838,29 +840,29 @@ impl RangeReader {
                         }
                         let result = request_builder
                             .send()
-                            .await
-                            .tap_err(|err| {
-                                self.punish_if_needed(
-                                    host_info.host(),
-                                    host_info.timeout_power(),
-                                    err,
-                                )
-                            })
-                            .map_err(io_error_from(IoErrorKind::ConnectionAborted));
+                            .await;
+                        if let Err(err) = &result {
+                            self.punish_if_needed(
+                                host_info.host(),
+                                host_info.timeout_power(),
+                                err,
+                            ).await;
+                        }
+                        let result = result.map_err(io_error_from(IoErrorKind::ConnectionAborted));
                         match result {
                             Ok(resp) => write_to_writer(resp,  &mut *buf_cursor).await,
                             Err(err) => Err(err),
                         }
                         .tap_ok(|_| {
                             info!(
-                                "[{}] download ok url: {}, start_from: {}, req_id: {:?}, elapsed: {:?}",
-                                tries, download_url, start_from, req_id, begin_at.elapsed(),
+                                "{{{}}} [{}] download ok url: {}, start_from: {}, req_id: {:?}, elapsed: {:?}",
+                                async_task_id, tries, download_url, start_from, req_id, begin_at.elapsed(),
                             );
                         })
                         .tap_err(|err| {
                             warn!(
-                                "[{}] download error url: {}, start_from: {}, error: {}, req_id: {:?}, elapsed: {:?}",
-                                tries, download_url, start_from, err, req_id, begin_at.elapsed(),
+                                "{{{}}} [{}] download error url: {}, start_from: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                                async_task_id, tries, download_url, start_from, err, req_id, begin_at.elapsed(),
                             );
                         })
                     }
@@ -894,14 +896,15 @@ impl RangeReader {
         }
     }
 
-    pub(crate) async fn read_last_bytes<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+    pub(super) async fn read_last_bytes<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         size: u64,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<(Vec<u8>, u64)> {
-        return   self.with_retries(
+        return self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadLastBytes,
             tries_info,
@@ -909,18 +912,18 @@ impl RangeReader {
             on_host_selected,
             move |tries, request_builder, req_id, download_url, host_info| async move {
                 debug!(
-                    "[{}] read_last_bytes url: {}, req_id: {:?}, len: {}",
-                    tries, download_url, req_id, size,
+                    "{{{}}} [{}] read_last_bytes url: {}, req_id: {:?}, len: {}",
+                    async_task_id, tries, download_url, req_id, size,
                 );
                 let begin_at = Instant::now();
                 let result = request_builder
                     .header(RANGE, format!("bytes=-{}", size))
                     .send()
-                    .await
-                    .tap_err(|err| {
-                        self.punish_if_needed(host_info.host(), host_info.timeout_power(), err)
-                    })
-                    .map_err(io_error_from(IoErrorKind::ConnectionAborted))
+                    .await;
+                    if let Err(err) = &result {
+                        self.punish_if_needed(host_info.host(), host_info.timeout_power(), err).await;
+                    }
+                    let result = result.map_err(io_error_from(IoErrorKind::ConnectionAborted))
                     .and_then(|resp| {
                         if resp.status() == StatusCode::PARTIAL_CONTENT {
                             Ok(resp)
@@ -934,14 +937,14 @@ impl RangeReader {
                 }
                 .tap_ok(|_| {
                     info!(
-                        "[{}] download ok url: {}, len: {}, req_id: {:?}, elapsed: {:?}",
-                        tries, download_url, size, req_id, begin_at.elapsed(),
+                        "{{{}}} [{}] download ok url: {}, len: {}, req_id: {:?}, elapsed: {:?}",
+                        async_task_id, tries, download_url, size, req_id, begin_at.elapsed(),
                     );
                 })
                 .tap_err(|err| {
                     warn!(
-                        "[{}] download error url: {}, len: {}, error: {}, req_id: {:?}, elapsed: {:?}",
-                        tries, download_url, size, err, req_id, begin_at.elapsed(),
+                        "{{{}}} [{}] download error url: {}, len: {}, error: {}, req_id: {:?}, elapsed: {:?}",
+                        async_task_id, tries, download_url, size, err, req_id, begin_at.elapsed(),
                     );
                 })
             }
@@ -956,6 +959,14 @@ impl RangeReader {
             let last_bytes = read_response_body(resp, Some(limit)).await?;
             Ok((last_bytes, total_size))
         }
+    }
+
+    async fn inner(&self) -> &Arc<AsyncRangeReaderInner> {
+        &self.0.get().await.0
+    }
+
+    async fn key(&self) -> &str {
+        &self.0.get().await.1
     }
 
     async fn with_retries<
@@ -976,17 +987,18 @@ impl RangeReader {
         let begin_at = SystemTime::now();
         let begin_at_instant = Instant::now();
         let mut last_error: Option<IoError> = None;
+        let inner = self.inner().await;
 
         loop {
             let tries = tries_info.have_tried.fetch_add(1, Relaxed);
             if tries >= tries_info.total_tries {
-                break;
+                return IoResult3::NoMoreTries(last_error);
             }
             let last_try = tries_info.total_tries - tries <= 1;
 
             let chosen_io_info = {
                 let mut guard = trying_hosts.lock().await;
-                if let Some(chosen) = self.inner.io_selector.select_host(&guard).await {
+                if let Some(chosen) = inner.io_selector.select_host(&guard).await {
                     guard.insert(chosen.host().to_owned());
                     drop(guard);
                     TryingHostInfo {
@@ -1001,19 +1013,18 @@ impl RangeReader {
             let download_url = sign_download_url_if_needed(
                 &make_download_url(
                     chosen_io_info.host(),
-                    self.inner.credential.access_key(),
-                    &self.inner.bucket,
-                    &self.key,
-                    self.inner.use_getfile_api,
-                    self.inner.normalize_key,
+                    inner.credential.access_key(),
+                    &inner.bucket,
+                    self.key().await,
+                    inner.use_getfile_api,
+                    inner.normalize_key,
                 ),
-                self.inner.private_url_lifetime,
-                &self.inner.credential,
+                inner.private_url_lifetime,
+                &inner.credential,
             );
             let req_id = get_req_id(begin_at, tries);
             let request_begin_at_instant = Instant::now();
-            let request_builder = self
-                .inner
+            let request_builder = inner
                 .http_client
                 .request(method.to_owned(), download_url.to_owned())
                 .header(REQUEST_ID_HEADER, req_id.to_owned());
@@ -1027,13 +1038,13 @@ impl RangeReader {
             .await
             {
                 Ok(result) => {
-                    self.inner.io_selector.reward(chosen_io_info.host()).await;
-                    self.inner
+                    inner.io_selector.reward(chosen_io_info.host()).await;
+                    inner
                         .dotter
                         .dot(DotType::Sdk, api_name, true, begin_at_instant.elapsed())
                         .await
                         .ok();
-                    self.inner
+                    inner
                         .dotter
                         .dot(
                             DotType::Http,
@@ -1046,12 +1057,11 @@ impl RangeReader {
                     return Ok(result).into();
                 }
                 Err(err) => {
-                    let punished = self
-                        .inner
+                    let punished = inner
                         .io_selector
-                        .punish(chosen_io_info.host(), &err, &self.inner.dotter)
+                        .punish(chosen_io_info.host(), &err, &inner.dotter)
                         .await;
-                    self.inner
+                    inner
                         .dotter
                         .dot(
                             DotType::Http,
@@ -1062,7 +1072,7 @@ impl RangeReader {
                         .await
                         .ok();
                     if !punished || last_try {
-                        self.inner
+                        inner
                             .dotter
                             .dot(DotType::Sdk, api_name, false, begin_at_instant.elapsed())
                             .await
@@ -1074,7 +1084,6 @@ impl RangeReader {
                 }
             }
         }
-        unreachable!();
 
         fn make_download_url(
             io_url: &str,
@@ -1121,25 +1130,46 @@ impl RangeReader {
         }
     }
 
-    fn punish_if_needed(&self, host: &str, timeout_power: usize, err: &ReqwestError) {
+    async fn punish_if_needed(&self, host: &str, timeout_power: usize, err: &ReqwestError) {
         if err.is_timeout() {
-            self.inner
+            self.inner()
+                .await
                 .io_selector
                 .increase_timeout_power_by(host, timeout_power)
         } else if err.is_connect() {
-            self.inner.io_selector.mark_connection_as_failed(host)
+            self.inner()
+                .await
+                .io_selector
+                .mark_connection_as_failed(host)
         }
     }
 }
 
+impl Debug for AsyncRangeReader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("AsyncRangeReader")
+            .field(&self.0.try_get())
+            .finish()
+    }
+}
+
+/// 通过 RangeReader::read_multi_ranges() 获取文件的区域以及对应的数据
+#[derive(Debug, Clone)]
+pub struct RangePart {
+    /// 区域对应的数据
+    pub data: Vec<u8>,
+    /// 区域的开始偏移量和区域长度
+    pub range: (u64, u64),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Result3<T, E> {
+pub(super) enum Result3<T, E> {
     Ok(T),
     Err(E),
     NoMoreTries(Option<E>),
 }
 
-pub(crate) type IoResult3<T> = Result3<T, IoError>;
+pub(super) type IoResult3<T> = Result3<T, IoError>;
 
 impl<T, E> From<Result<T, E>> for Result3<T, E> {
     fn from(r: Result<T, E>) -> Self {
@@ -1150,7 +1180,7 @@ impl<T, E> From<Result<T, E>> for Result3<T, E> {
     }
 }
 
-pub(crate) type TryingHosts = Arc<Mutex<HashSet<String>>>;
+pub(super) type TryingHosts = Arc<Mutex<HashSet<String>>>;
 
 struct TryingHostInfo {
     host_info: HostInfo,
@@ -1180,13 +1210,13 @@ impl Drop for TryingHostInfo {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct TriesInfo<'a> {
+pub(super) struct TriesInfo<'a> {
     have_tried: &'a AtomicUsize,
     total_tries: usize,
 }
 
 impl<'a> TriesInfo<'a> {
-    pub(crate) fn new(have_tried: &'a AtomicUsize, total_tries: usize) -> Self {
+    pub(super) fn new(have_tried: &'a AtomicUsize, total_tries: usize) -> Self {
         Self {
             have_tried,
             total_tries,
@@ -1194,7 +1224,6 @@ impl<'a> TriesInfo<'a> {
     }
 }
 
-#[inline]
 fn unexpected_status_code(resp: &HttpResponse) -> IoError {
     let error_kind = if resp.status().is_client_error() {
         IoErrorKind::InvalidData
@@ -1412,7 +1441,7 @@ mod tests {
             {
                 let have_tried = AtomicUsize::new(0);
                 let io_urls = io_urls.to_owned();
-                let downloader = RangeReader::builder(
+                let downloader = AsyncRangeReader::builder(
                     "bucket".to_owned(),
                     "file".to_owned(),
                     get_credential(),
@@ -1423,12 +1452,12 @@ mod tests {
                 .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                 .dot_interval(Duration::from_millis(0))
                 .max_dot_buffer_size(1)
-                .build()
-                .await;
+                .build();
                 match downloader
                     .read_at(
                         5,
                         6,
+                        0,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
                         |_| async {},
@@ -1444,7 +1473,7 @@ mod tests {
             {
                 let have_tried = AtomicUsize::new(0);
                 let io_urls = io_urls.to_owned();
-                let downloader = RangeReader::builder(
+                let downloader = AsyncRangeReader::builder(
                     "bucket".to_owned(),
                     "file2".to_owned(),
                     get_credential(),
@@ -1455,12 +1484,12 @@ mod tests {
                 .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                 .dot_interval(Duration::from_millis(0))
                 .max_dot_buffer_size(1)
-                .build()
-                .await;
+                .build();
                 match downloader
                     .read_at(
                         5,
                         12,
+                        0,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
                         |_| async {},
@@ -1514,7 +1543,7 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1525,12 +1554,12 @@ mod tests {
             .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
             .dot_interval(Duration::from_millis(0))
             .max_dot_buffer_size(1)
-            .build()
-            .await;
+            .build();
             match downloader
                 .read_at(
                     1,
                     5,
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1582,7 +1611,7 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1593,12 +1622,12 @@ mod tests {
             .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
             .dot_interval(Duration::from_millis(0))
             .max_dot_buffer_size(1)
-            .build()
-            .await;
+            .build();
             match downloader
                 .read_at(
                     1,
                     5,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -1650,7 +1679,7 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1661,11 +1690,11 @@ mod tests {
             .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
             .dot_interval(Duration::from_millis(0))
             .max_dot_buffer_size(1)
-            .build()
-            .await;
+            .build();
             match downloader
                 .read_last_bytes(
                     10,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -1709,7 +1738,7 @@ mod tests {
         let io_routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1720,12 +1749,12 @@ mod tests {
             .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
             .dot_interval(Duration::from_millis(0))
             .max_dot_buffer_size(1)
-            .build()
-            .await;
+            .build();
 
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -1741,6 +1770,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -1756,6 +1786,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -1825,7 +1856,7 @@ mod tests {
 
         starts_with_server!(addr, monitor_addr, routes, records_map, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1836,12 +1867,12 @@ mod tests {
             .normalize_key(true)
             .dot_interval(Duration::from_millis(0))
             .max_dot_buffer_size(1)
-            .build()
-            .await;
+            .build();
 
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1855,6 +1886,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1868,6 +1900,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1940,7 +1973,7 @@ mod tests {
         };
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -1948,11 +1981,12 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1966,6 +2000,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -1979,6 +2014,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
                     |_| async {},
@@ -2001,7 +2037,7 @@ mod tests {
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2009,12 +2045,12 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
 
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2030,6 +2066,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2045,6 +2082,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2102,7 +2140,7 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2110,13 +2148,14 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let ranges = [(0, 5), (5, 5)];
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2152,7 +2191,7 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2160,13 +2199,14 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let ranges = [(0, 5), (5, 5)];
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2210,7 +2250,7 @@ mod tests {
             let c = counter.to_owned();
             spawn(async move {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder(
+                let downloader = AsyncRangeReader::builder(
                     "bucket".to_owned(),
                     "file".to_owned(),
                     get_credential(),
@@ -2218,13 +2258,14 @@ mod tests {
                 )
                 .use_getfile_api(false)
                 .normalize_key(true)
-                .build()
-                .await;
+                .build();
+
                 let ranges = [(0, 5), (5, 5)];
                 let have_tried = AtomicUsize::new(0);
                 match downloader
                     .read_multi_ranges(
                         &ranges,
+                        0,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
                         |_| async {},
@@ -2241,20 +2282,21 @@ mod tests {
             let c = counter.to_owned();
             spawn(async move {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder(
+                let downloader = AsyncRangeReader::builder(
                     "bucket".to_owned(),
                     "/file".to_owned(),
                     get_credential(),
                     io_urls,
                 )
                 .use_getfile_api(false)
-                .build()
-                .await;
+                .build();
+
                 let ranges = [(0, 5), (5, 5)];
                 let have_tried = AtomicUsize::new(0);
                 match downloader
                     .read_multi_ranges(
                         &ranges,
+                        0,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
                         |_| async {},
@@ -2314,7 +2356,7 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2322,13 +2364,14 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let ranges = [(0, 5), (5, 5)];
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2365,7 +2408,7 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2373,13 +2416,14 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let ranges = [(0, 5), (5, 1)];
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2418,7 +2462,7 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2426,13 +2470,14 @@ mod tests {
             )
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             let ranges = [(0, 4)];
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},
@@ -2460,7 +2505,7 @@ mod tests {
         starts_with_server!(io_addr, uc_addr, routes, {
             let io_urls = vec!["http://fakedomain:12345".to_owned()];
             let uc_urls = vec![format!("http://{}", uc_addr)];
-            let downloader = RangeReader::builder(
+            let downloader = AsyncRangeReader::builder(
                 "bucket".to_owned(),
                 "file".to_owned(),
                 get_credential(),
@@ -2469,8 +2514,8 @@ mod tests {
             .uc_urls(uc_urls)
             .use_getfile_api(false)
             .normalize_key(true)
-            .build()
-            .await;
+            .build();
+
             assert_eq!(downloader.io_urls().await, io_urls);
             assert!(downloader.update_urls().await);
             assert_eq!(
@@ -2480,6 +2525,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
                     |_| async {},

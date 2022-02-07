@@ -12,6 +12,7 @@ use std::{
 #[derive(Debug, Clone)]
 pub struct Configurable(ConfigurableInner);
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 enum ConfigurableInner {
     Single(SingleClusterConfig),

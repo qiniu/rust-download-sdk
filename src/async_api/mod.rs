@@ -15,7 +15,9 @@ pub use dot::{
 };
 
 mod download;
-pub use download::{sign_download_url_with_deadline, sign_download_url_with_lifetime};
-pub(crate) use download::{RangePart, RangeReader, RangeReaderBuilder, RangeReaderInner};
+pub use download::{sign_download_url_with_deadline, sign_download_url_with_lifetime, RangePart};
+pub(crate) use download::{AsyncRangeReaderBuilder, AsyncRangeReaderInner};
 
 mod retrier;
+
+mod sync;

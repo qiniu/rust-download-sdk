@@ -7,4 +7,4 @@ mod query;
 mod req_id;
 
 mod download;
-pub(crate) use download::{RangePart, RangeReader, RangeReaderBuilder, RangeReaderInner};
+pub(crate) use download::{RangeReader, RangeReaderBuilder, RangeReaderInner};

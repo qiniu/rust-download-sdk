@@ -14,8 +14,7 @@ pub use multi_clusters::{
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
 use super::{
-    async_api::RangeReaderBuilder as AsyncRangeReaderBuilder, base::credential::Credential,
-    sync_api::RangeReaderBuilder,
+    async_api::AsyncRangeReaderBuilder, base::credential::Credential, sync_api::RangeReaderBuilder,
 };
 use log::{error, info, warn};
 use static_vars::qiniu_config;
@@ -330,17 +329,21 @@ pub(super) fn build_async_range_reader_builder_from_config(
     builder
 }
 
-pub(super) fn build_async_range_reader_builder_from_env(
+pub(super) fn build_async_range_reader_builder_from_env_with_extra_options(
     key: String,
     only_single_cluster: bool,
-) -> Option<AsyncRangeReaderBuilder> {
+) -> Option<(AsyncRangeReaderBuilder, Option<usize>, Option<usize>)> {
     with_current_qiniu_config(|config| {
         config.and_then(|config| {
             if only_single_cluster && config.as_single().is_some() {
                 return None;
             }
             config.with_key(&key.to_owned(), move |config| {
-                build_async_range_reader_builder_from_config(key, config)
+                (
+                    build_async_range_reader_builder_from_config(key, config),
+                    config.max_retry_concurrency(),
+                    config.retry(),
+                )
             })
         })
     })

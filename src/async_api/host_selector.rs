@@ -1,14 +1,15 @@
 use super::dot::Dotter;
 use dashmap::DashMap;
-use futures::future::BoxFuture;
 use log::info;
 use rand::{seq::SliceRandom, thread_rng};
 use std::{
     cmp::{min, Ordering},
     collections::HashSet,
     fmt::{Debug, Formatter, Result as FormatResult},
+    future::Future,
     io::{Error as IoError, Result as IoResult},
     ops::Deref,
+    pin::Pin,
     sync::{
         atomic::{AtomicUsize, Ordering::Relaxed},
         Arc,
@@ -129,7 +130,12 @@ impl<'a> Candidate<'a> {
     }
 }
 
-type UpdateFn = Box<dyn Fn() -> BoxFuture<'static, IoResult<Vec<String>>> + Sync + Send + 'static>;
+type UpdateFn = Box<
+    dyn Fn() -> Pin<Box<dyn Future<Output = IoResult<Vec<String>>> + Send + Sync + 'static>>
+        + Sync
+        + Send
+        + 'static,
+>;
 
 struct HostsUpdater {
     hosts: RwLock<Vec<String>>,
@@ -257,7 +263,13 @@ impl Debug for HostsUpdater {
     }
 }
 
-type ShouldPunishFn = Box<dyn Fn(&IoError) -> BoxFuture<'static, bool> + Send + Sync + 'static>;
+type ShouldPunishFn = Box<
+    dyn Fn(&IoError) -> Pin<Box<dyn Future<Output = bool> + Send + Sync + 'static>>
+        + Send
+        + Sync
+        + 'static,
+>;
+
 struct HostPunisher {
     should_punish_func: Option<ShouldPunishFn>,
     punish_duration: Duration,

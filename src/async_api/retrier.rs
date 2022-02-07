@@ -1,48 +1,221 @@
 use super::{
-    download::{IoResult3, RangeReader, Result3, TriesInfo, TryingHosts},
+    download::{AsyncRangeReader, IoResult3, Result3, TriesInfo, TryingHosts},
     host_selector::HostInfo,
     RangePart,
 };
 use async_trait::async_trait;
-use futures::future::{join_all, select, select_all, BoxFuture, Either};
+use futures::future::{join_all, select, select_all, Either};
+use log::{error, info};
 use std::{
     future::Future,
-    io::Error as IoError,
+    io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult},
     mem::take,
     pin::Pin,
-    sync::Arc,
+    sync::{atomic::AtomicUsize, Arc},
     task::{Context, Poll},
     time::Duration,
 };
-use tokio::{pin, sync::Mutex, time::sleep_until, time::Instant};
+use tokio::{pin, sync::RwLock, time::sleep_until, time::Instant};
+
+#[derive(Debug, Clone)]
+pub(super) struct AsyncRangeReaderWithRangeReader {
+    inner: AsyncRangeReader,
+    max_retry_concurrency: usize,
+    total_tries: usize,
+}
+
+impl AsyncRangeReaderWithRangeReader {
+    pub(super) fn new(
+        range_reader: AsyncRangeReader,
+        max_retry_concurrency: usize,
+        total_tries: usize,
+    ) -> Self {
+        Self {
+            inner: range_reader,
+            max_retry_concurrency,
+            total_tries,
+        }
+    }
+
+    pub(super) async fn update_urls(&self) -> bool {
+        self.inner.update_urls().await
+    }
+
+    pub(super) async fn io_urls(&self) -> Vec<String> {
+        self.inner.io_urls().await
+    }
+
+    pub(super) async fn read_at(&self, pos: u64, size: u64) -> IoResult<Vec<u8>> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderReadAtRetrier::new(
+                    pos,
+                    size,
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+
+    pub(super) async fn read_multi_ranges(
+        &self,
+        ranges: &[(u64, u64)],
+    ) -> IoResult<Vec<RangePart>> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderReadMultiRangesRetrier::new(
+                    ranges,
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+
+    pub(super) async fn exist(&self) -> IoResult<bool> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderExistRetrier::new(
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+
+    pub(super) async fn file_size(&self) -> IoResult<u64> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderFileSizeRetrier::new(
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+
+    pub(super) async fn download(&self) -> IoResult<Vec<u8>> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderDownloadRetrier::new(
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+
+    pub(super) async fn read_last_bytes(&self, size: u64) -> IoResult<(Vec<u8>, u64)> {
+        let have_tried: AtomicUsize = Default::default();
+        let trying_hosts: TryingHosts = Default::default();
+        let selected_info: SelectedHostInfo = Default::default();
+        try_with_timeout(
+            |async_task_id| {
+                RangeReaderReadLastBytesRetrier::new(
+                    size,
+                    async_task_id,
+                    &self.inner,
+                    TriesInfo::new(&have_tried, self.total_tries),
+                    &trying_hosts,
+                    &selected_info,
+                )
+            },
+            self.max_retry_concurrency,
+        )
+        .await
+        .into()
+    }
+}
 
 #[async_trait]
-pub(super) trait MayBeTimeout {
-    fn base_timeout(&self) -> Duration;
+trait MayBeTimeout {
+    async fn base_timeout(&self) -> Duration;
     async fn increase_timeout_power_if_timed_out(self);
 }
 
 #[derive(Debug)]
-pub(super) enum TryResult<T> {
+enum TryResult<T> {
     Success(T),
     Error(IoError),
     AllTimedOut,
 }
 
-pub(super) async fn try_with_timeout<
+impl<T> From<TryResult<T>> for IoResult<T> {
+    fn from(try_result: TryResult<T>) -> Self {
+        match try_result {
+            TryResult::Success(value) => Ok(value),
+            TryResult::Error(err) => Err(err),
+            TryResult::AllTimedOut => Err(IoError::new(
+                IoErrorKind::TimedOut,
+                "All concurrency requests are timed out",
+            )),
+        }
+    }
+}
+
+async fn try_with_timeout<
     Output,
-    T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send,
-    F: Fn() -> T,
+    T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync,
+    F: Fn(usize) -> T,
 >(
     f: F,
     max: usize,
 ) -> TryResult<Output> {
-    struct FutWithIdx<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send> {
+    struct FutWithIdx<
+        Output,
+        T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync,
+    > {
         idx: usize,
         fut: T,
     }
 
-    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send> Future
+    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync> Future
         for FutWithIdx<Output, T>
     {
         type Output = IoResult3<Output>;
@@ -53,11 +226,11 @@ pub(super) async fn try_with_timeout<
     }
 
     #[async_trait]
-    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send> MayBeTimeout
-        for FutWithIdx<Output, T>
+    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync>
+        MayBeTimeout for FutWithIdx<Output, T>
     {
-        fn base_timeout(&self) -> Duration {
-            self.fut.base_timeout()
+        async fn base_timeout(&self) -> Duration {
+            self.fut.base_timeout().await
         }
 
         async fn increase_timeout_power_if_timed_out(self) {
@@ -65,24 +238,33 @@ pub(super) async fn try_with_timeout<
         }
     }
 
-    let last_fut = FutWithIdx { fut: f(), idx: 0 };
-    let mut last_base_timeout = last_fut.base_timeout();
+    let last_fut = FutWithIdx { fut: f(0), idx: 0 };
+    let mut last_base_timeout = last_fut.base_timeout().await;
     let mut all_futures = vec![last_fut];
     let mut last_error = None;
 
     'timeout_loop: for i in 0..max {
         let last_try = i >= max - 1;
         let until = Instant::now() + last_base_timeout;
+        info!("{{{}}} Timeout-try ({:?})", i, last_base_timeout);
         loop {
             let timeout = sleep_until(until);
             pin!(timeout);
             match select(timeout, select_all(take(&mut all_futures))).await {
                 Either::Left((_, futs)) => {
                     if last_try {
+                        info!(
+                            "{{{}}} Try timed out ({:?}), this is the last try",
+                            i, last_base_timeout
+                        );
                         break 'timeout_loop;
                     } else {
-                        let last_fut = f();
-                        last_base_timeout = last_fut.base_timeout();
+                        info!(
+                            "{{{}}} Try timed out ({:?}), spawn new async task",
+                            i, last_base_timeout
+                        );
+                        let last_fut = f(i + 1);
+                        last_base_timeout = last_fut.base_timeout().await;
                         all_futures = futs.into_inner();
                         all_futures.push(FutWithIdx {
                             fut: last_fut,
@@ -93,6 +275,7 @@ pub(super) async fn try_with_timeout<
                 }
                 Either::Right(((got_result, idx, rest_futures), _)) => match got_result {
                     Result3::Ok(output) => {
+                        info!("{{{}/{}}} Try succeed", idx, i);
                         punish_all_timed_out_futures(
                             rest_futures.into_iter().filter(|f| f.idx < idx),
                         )
@@ -100,6 +283,7 @@ pub(super) async fn try_with_timeout<
                         return TryResult::Success(output);
                     }
                     Result3::Err(err) => {
+                        info!("{{{}/{}}} Try error: {:?}", idx, i, err);
                         punish_all_timed_out_futures(
                             rest_futures.into_iter().filter(|f| f.idx < idx),
                         )
@@ -107,6 +291,10 @@ pub(super) async fn try_with_timeout<
                         return TryResult::Error(err);
                     }
                     Result3::NoMoreTries(maybe_err) => {
+                        info!(
+                            "{{{}/{}}} No more tries: {:?}, will wait for the other async tasks",
+                            idx, i, maybe_err
+                        );
                         if last_error.is_none() {
                             last_error = maybe_err;
                         }
@@ -117,6 +305,7 @@ pub(super) async fn try_with_timeout<
         }
     }
 
+    error!("All {} async tasks are timed out", max);
     punish_all_timed_out_futures(take(&mut all_futures)).await;
 
     return if let Some(err) = last_error {
@@ -141,13 +330,13 @@ struct SelectedHostInfoInner {
     selected_at: Instant,
 }
 
-#[derive(Clone)]
-struct SelectedHostInfo(Arc<Mutex<SelectedHostInfoInner>>);
+#[derive(Clone, Default)]
+struct SelectedHostInfo(Arc<RwLock<Option<SelectedHostInfoInner>>>);
 
 struct RangeReaderRetrier<'a, T> {
-    range_reader: &'a RangeReader,
+    range_reader: &'a AsyncRangeReader,
     selected_info: &'a SelectedHostInfo,
-    future: BoxFuture<'a, IoResult3<T>>,
+    future: Pin<Box<dyn Future<Output = IoResult3<T>> + Send + Sync + 'a>>,
 }
 
 impl<T> Future for RangeReaderRetrier<'_, T> {
@@ -161,18 +350,20 @@ impl<T> Future for RangeReaderRetrier<'_, T> {
 #[async_trait]
 impl<T> MayBeTimeout for RangeReaderRetrier<'_, T> {
     async fn increase_timeout_power_if_timed_out(self) {
-        let selected_info = self.selected_info.0.lock().await;
-
-        if selected_info.selected_at.elapsed() > selected_info.host_info.timeout() {
-            self.range_reader.increase_timeout_power_by(
-                selected_info.host_info.host(),
-                selected_info.host_info.timeout_power(),
-            );
+        if let Some(selected_info) = self.selected_info.0.read().await.as_ref() {
+            if selected_info.selected_at.elapsed() > selected_info.host_info.timeout() {
+                self.range_reader
+                    .increase_timeout_power_by(
+                        selected_info.host_info.host(),
+                        selected_info.host_info.timeout_power(),
+                    )
+                    .await;
+            }
         }
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.range_reader.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.range_reader.base_timeout().await
     }
 }
 
@@ -182,7 +373,8 @@ impl<'a> RangeReaderReadAtRetrier<'a> {
     fn new(
         pos: u64,
         size: u64,
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -192,9 +384,14 @@ impl<'a> RangeReaderReadAtRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .read_at(pos, size, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .read_at(
+                        pos,
+                        size,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -215,8 +412,8 @@ impl MayBeTimeout for RangeReaderReadAtRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
@@ -225,7 +422,8 @@ struct RangeReaderReadMultiRangesRetrier<'a>(RangeReaderRetrier<'a, Vec<RangePar
 impl<'a> RangeReaderReadMultiRangesRetrier<'a> {
     fn new(
         ranges: &'a [(u64, u64)],
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -235,9 +433,13 @@ impl<'a> RangeReaderReadMultiRangesRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .read_multi_ranges(ranges, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .read_multi_ranges(
+                        ranges,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -258,8 +460,8 @@ impl MayBeTimeout for RangeReaderReadMultiRangesRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
@@ -267,7 +469,8 @@ struct RangeReaderExistRetrier<'a>(RangeReaderRetrier<'a, bool>);
 
 impl<'a> RangeReaderExistRetrier<'a> {
     fn new(
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -277,7 +480,7 @@ impl<'a> RangeReaderExistRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .exist(tries_info, trying_hosts, |host| async move {
+                    .exist(async_task_id, tries_info, trying_hosts, |host| async move {
                         set_selected_info(selected_info, host).await
                     })
                     .await
@@ -300,8 +503,8 @@ impl MayBeTimeout for RangeReaderExistRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
@@ -309,7 +512,8 @@ struct RangeReaderFileSizeRetrier<'a>(RangeReaderRetrier<'a, u64>);
 
 impl<'a> RangeReaderFileSizeRetrier<'a> {
     fn new(
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -319,7 +523,7 @@ impl<'a> RangeReaderFileSizeRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .file_size(tries_info, trying_hosts, |host| async move {
+                    .file_size(async_task_id, tries_info, trying_hosts, |host| async move {
                         set_selected_info(selected_info, host).await
                     })
                     .await
@@ -342,8 +546,8 @@ impl MayBeTimeout for RangeReaderFileSizeRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
@@ -351,7 +555,8 @@ struct RangeReaderDownloadRetrier<'a>(RangeReaderRetrier<'a, Vec<u8>>);
 
 impl<'a> RangeReaderDownloadRetrier<'a> {
     fn new(
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -361,7 +566,7 @@ impl<'a> RangeReaderDownloadRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .download(tries_info, trying_hosts, |host| async move {
+                    .download(async_task_id, tries_info, trying_hosts, |host| async move {
                         set_selected_info(selected_info, host).await
                     })
                     .await
@@ -384,8 +589,8 @@ impl MayBeTimeout for RangeReaderDownloadRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
@@ -394,7 +599,8 @@ struct RangeReaderReadLastBytesRetrier<'a>(RangeReaderRetrier<'a, (Vec<u8>, u64)
 impl<'a> RangeReaderReadLastBytesRetrier<'a> {
     fn new(
         size: u64,
-        range_reader: &'a RangeReader,
+        async_task_id: usize,
+        range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
         selected_info: &'a SelectedHostInfo,
@@ -404,9 +610,13 @@ impl<'a> RangeReaderReadLastBytesRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .read_last_bytes(size, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .read_last_bytes(
+                        size,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -427,16 +637,16 @@ impl MayBeTimeout for RangeReaderReadLastBytesRetrier<'_> {
         self.0.increase_timeout_power_if_timed_out().await
     }
 
-    fn base_timeout(&self) -> Duration {
-        self.0.base_timeout()
+    async fn base_timeout(&self) -> Duration {
+        self.0.base_timeout().await
     }
 }
 
 async fn set_selected_info(selected_info: &SelectedHostInfo, host: HostInfo) {
-    *selected_info.0.lock().await = SelectedHostInfoInner {
+    *selected_info.0.write().await = Some(SelectedHostInfoInner {
         host_info: host.to_owned(),
         selected_at: Instant::now(),
-    };
+    });
 }
 
 #[cfg(test)]
@@ -479,8 +689,8 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: Send> MayBeTimeout for FakedRetrier<T> {
-        fn base_timeout(&self) -> Duration {
+    impl<T: Send + Sync> MayBeTimeout for FakedRetrier<T> {
+        async fn base_timeout(&self) -> Duration {
             self.base_timeout
         }
 
@@ -499,8 +709,8 @@ mod tests {
             let retrier_punished_1 = retrier_punished_1.to_owned();
             let retrier_punished_2 = retrier_punished_2.to_owned();
             try_with_timeout(
-                move || {
-                    let count = counter.fetch_add(1, Relaxed);
+                move |count| {
+                    counter.store(count, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
                     match count {
@@ -538,8 +748,8 @@ mod tests {
             let retrier_punished_1 = retrier_punished_1.to_owned();
             let retrier_punished_2 = retrier_punished_2.to_owned();
             try_with_timeout(
-                move || {
-                    let count = counter.fetch_add(1, Relaxed);
+                move |count| {
+                    counter.store(count, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
                     match count {
@@ -572,8 +782,8 @@ mod tests {
         let result = {
             let counter = counter.to_owned();
             try_with_timeout(
-                move || {
-                    let count = counter.fetch_add(1, Relaxed);
+                move |count| {
+                    counter.store(count, Relaxed);
                     assert!(count < 6);
                     FakedRetrier::new(
                         Duration::from_millis(1000),

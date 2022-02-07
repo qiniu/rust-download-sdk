@@ -1,6 +1,6 @@
 use super::{
     super::{
-        async_api::sign_download_url_with_lifetime,
+        async_api::{sign_download_url_with_lifetime, RangePart},
         base::credential::Credential,
         config::{
             build_range_reader_builder_from_config, build_range_reader_builder_from_env,
@@ -535,15 +535,6 @@ impl ReadAt for RangeReader {
             },
         )
     }
-}
-
-/// 通过 RangeReader::read_multi_ranges() 获取文件的区域以及对应的数据
-#[derive(Debug, Clone)]
-pub struct RangePart {
-    /// 区域对应的数据
-    pub data: Vec<u8>,
-    /// 区域的开始偏移量和区域长度
-    pub range: (u64, u64),
 }
 
 impl RangeReader {
@@ -1155,7 +1146,8 @@ impl RangeReader {
 pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
 
-#[inline]
+#[cold]
+#[inline(never)]
 fn unexpected_status_code(resp: &HTTPResponse) -> IOError {
     let error_kind = if resp.status().is_client_error() {
         IOErrorKind::InvalidData
@@ -1197,10 +1189,8 @@ mod tests {
     use multipart::client::lazy::Multipart;
     use serde_json::{json, to_vec as json_to_vec};
     use std::{
-        boxed::Box,
-        error::Error,
+        fs::remove_file,
         io::Read,
-        result::Result,
         sync::{
             atomic::{AtomicUsize, Ordering::Relaxed},
             Arc,
@@ -1304,13 +1294,12 @@ mod tests {
         }};
     }
 
-    #[inline]
     fn get_credential() -> Credential {
         Credential::new("1234567890", "abcdefghijk")
     }
 
     #[tokio::test]
-    async fn test_read_at() -> Result<(), Box<dyn Error>> {
+    async fn test_read_at() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1389,7 +1378,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_at_2() -> Result<(), Box<dyn Error>> {
+    async fn test_read_at_2() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1443,7 +1432,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_at_3() -> Result<(), Box<dyn Error>> {
+    async fn test_read_at_3() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1496,7 +1485,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_read_last_bytes() -> Result<(), Box<dyn Error>> {
+    async fn test_read_last_bytes() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1555,7 +1544,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_file() -> Result<(), Box<dyn Error>> {
+    async fn test_download_file() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1616,7 +1605,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_file_2() -> Result<(), Box<dyn Error>> {
+    async fn test_download_file_2() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1691,7 +1680,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_file_3() -> Result<(), Box<dyn Error>> {
+    async fn test_download_file_3() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1723,7 +1712,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_file_4() -> Result<(), Box<dyn Error>> {
+    async fn test_download_file_4() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1750,7 +1739,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1809,7 +1798,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_2() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range_2() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1842,7 +1831,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_3() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range_3() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1891,7 +1880,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_4() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range_4() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1950,7 +1939,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_5() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range_5() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -1981,7 +1970,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_download_range_6() -> Result<(), Box<dyn Error>> {
+    async fn test_download_range_6() -> anyhow::Result<()> {
         env_logger::try_init().ok();
 
         let routes = {
@@ -2015,7 +2004,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_update_hosts() -> Result<(), Box<dyn Error>> {
+    async fn test_update_hosts() -> anyhow::Result<()> {
         env_logger::try_init().ok();
         clear_cache()?;
 
@@ -2042,7 +2031,7 @@ mod tests {
 
     fn clear_cache() -> IOResult<()> {
         let cache_file_path = cache_dir_path_of("query-cache.json")?;
-        std::fs::remove_file(&cache_file_path).or_else(|err| {
+        remove_file(&cache_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
             } else {
@@ -2050,7 +2039,7 @@ mod tests {
             }
         })?;
         let dot_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
-        std::fs::remove_file(&dot_file_path).or_else(|err| {
+        remove_file(&dot_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
             } else {

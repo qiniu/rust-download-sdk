@@ -1,5 +1,5 @@
 use super::{
-    super::{async_api::RangeReaderInner as AsyncRangeReaderInner, sync_api::RangeReaderInner},
+    super::{async_api::AsyncRangeReaderInner, sync_api::RangeReaderInner},
     ClustersConfigParseError, Timeouts,
 };
 use once_cell::sync::OnceCell;
@@ -43,6 +43,7 @@ pub struct Config {
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
+    max_retry_concurrency: Option<usize>,
 
     #[serde(skip)]
     extra: Extra,
@@ -290,6 +291,20 @@ impl Config {
         self
     }
 
+    /// 获取最大并行重试次数
+    #[inline]
+    pub fn max_retry_concurrency(&self) -> Option<usize> {
+        self.max_retry_concurrency
+    }
+
+    /// 设置最大并行重试次数
+    #[inline]
+    pub fn set_max_retry_concurrency(&mut self, max_retry_concurrency: Option<usize>) -> &mut Self {
+        self.max_retry_concurrency = max_retry_concurrency;
+        self.uninit_range_reader_inner();
+        self
+    }
+
     #[inline]
     pub(super) fn original_path(&self) -> Option<&Path> {
         self.extra.original_path.as_ref().map(|p| p.as_ref())
@@ -466,6 +481,13 @@ impl ConfigBuilder {
     pub fn connect_timeout(mut self, connect_timeout: Option<Duration>) -> Self {
         self.0.dial_timeout_ms =
             connect_timeout.map(|d| d.as_millis().try_into().unwrap_or(u64::MAX));
+        self
+    }
+
+    /// 配置最大并行重试次数，默认为 5
+    #[inline]
+    pub fn max_retry_concurrency(mut self, max_retry_concurrency: Option<usize>) -> Self {
+        self.0.max_retry_concurrency = max_retry_concurrency;
         self
     }
 
