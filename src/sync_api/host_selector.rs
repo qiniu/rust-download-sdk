@@ -24,14 +24,12 @@ struct OptionalInstantTime(Option<Instant>);
 impl Deref for OptionalInstantTime {
     type Target = Option<Instant>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl OptionalInstantTime {
-    #[inline]
     fn now() -> Self {
         Self(Some(Instant::now()))
     }
@@ -45,7 +43,7 @@ struct PunishedInfo {
     failed_to_connect: bool,
 }
 
-impl<'a> Ord for PunishedInfo {
+impl Ord for PunishedInfo {
     fn cmp(&self, other: &Self) -> Ordering {
         if self.failed_to_connect != other.failed_to_connect {
             return self.failed_to_connect.cmp(&other.failed_to_connect);
@@ -62,8 +60,7 @@ impl<'a> Ord for PunishedInfo {
     }
 }
 
-impl<'a> PartialOrd for PunishedInfo {
-    #[inline]
+impl PartialOrd for PunishedInfo {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -79,7 +76,6 @@ struct Candidate<'a> {
 
 impl<'a> Eq for Candidate<'a> {}
 impl<'a> PartialEq for Candidate<'a> {
-    #[inline]
     fn eq(&self, other: &Self) -> bool {
         self.punished_info == other.punished_info
             && self.punish_duration == other.punish_duration
@@ -103,14 +99,12 @@ impl<'a> Ord for Candidate<'a> {
 }
 
 impl<'a> PartialOrd for Candidate<'a> {
-    #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 impl<'a> Candidate<'a> {
-    #[inline]
     fn is_punishment_expired(&self) -> bool {
         if let Some(last_punished_at) = self.punished_info.last_punished_at.as_ref() {
             last_punished_at.elapsed() >= self.punish_duration
@@ -119,7 +113,6 @@ impl<'a> Candidate<'a> {
         }
     }
 
-    #[inline]
     fn is_available(&self) -> bool {
         !self.punished_info.failed_to_connect
             && self.punished_info.continuous_punished_times <= self.max_punished_times
@@ -143,7 +136,6 @@ struct UpdateOption {
 }
 
 impl UpdateOption {
-    #[inline]
     fn new(func: UpdateFn, interval: Duration) -> Self {
         Self {
             func,
@@ -191,7 +183,6 @@ impl HostsUpdater {
         false
     }
 
-    #[inline]
     fn next_index(updater: &Arc<HostsUpdater>) -> usize {
         return updater.index.fetch_add(1, Relaxed).tap(|_| {
             try_to_auto_update(updater);
@@ -228,7 +219,6 @@ impl HostsUpdater {
         }
     }
 
-    #[inline]
     pub(super) fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
         if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
             timeout_power = timeout_power.saturating_add(1);
@@ -243,7 +233,6 @@ impl HostsUpdater {
         }
     }
 
-    #[inline]
     pub(super) fn mark_connection_as_failed(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
             punished_info.failed_to_connect = true;
@@ -270,18 +259,15 @@ struct HostPunisher {
 }
 
 impl HostPunisher {
-    #[inline]
     fn max_seek_times(&self, hosts_count: usize) -> usize {
         hosts_count * usize::from(self.max_punished_hosts_percent) / 100
     }
 
-    #[inline]
     fn is_available(&self, punished_info: &PunishedInfo) -> bool {
         !punished_info.failed_to_connect
             && punished_info.continuous_punished_times <= self.max_punished_times
     }
 
-    #[inline]
     fn is_punishment_expired(&self, punished_info: &PunishedInfo) -> bool {
         if let Some(last_punished_at) = punished_info.last_punished_at.as_ref() {
             last_punished_at.elapsed() >= self.punish_duration
@@ -290,7 +276,6 @@ impl HostPunisher {
         }
     }
 
-    #[inline]
     fn timeout(&self, punished_info: &PunishedInfo) -> Duration {
         min(
             // 超时时长有上限，否则可能超过 tokio 极限
@@ -299,7 +284,6 @@ impl HostPunisher {
         )
     }
 
-    #[inline]
     fn should_punish(&self, error: &IOError) -> bool {
         if let Some(should_punish_func) = &self.should_punish_func {
             should_punish_func(error)
@@ -355,13 +339,11 @@ impl HostSelectorBuilder {
         }
     }
 
-    #[inline]
     pub(super) fn update_callback(mut self, update_func: Option<UpdateFn>) -> Self {
         self.update_func = update_func;
         self
     }
 
-    #[inline]
     pub(super) fn should_punish_callback(
         mut self,
         should_punish_func: Option<ShouldPunishFn>,
@@ -370,37 +352,31 @@ impl HostSelectorBuilder {
         self
     }
 
-    #[inline]
     pub(super) fn update_interval(mut self, interval: Duration) -> Self {
         self.update_interval = interval;
         self
     }
 
-    #[inline]
     pub(super) fn punish_duration(mut self, duration: Duration) -> Self {
         self.punish_duration = duration;
         self
     }
 
-    #[inline]
     pub(super) fn base_timeout(mut self, timeout: Duration) -> Self {
         self.base_timeout = timeout;
         self
     }
 
-    #[inline]
     pub(super) fn max_punished_times(mut self, times: usize) -> Self {
         self.max_punished_times = times;
         self
     }
 
-    #[inline]
     pub(super) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
         self.max_punished_hosts_percent = percent;
         self
     }
 
-    #[inline]
     pub(super) fn build(self) -> HostSelector {
         let auto_update_enabled = self.update_func.is_some();
         let is_hosts_empty = self.hosts.is_empty();
@@ -436,17 +412,14 @@ pub(super) struct HostInfo {
 }
 
 impl HostSelector {
-    #[inline]
     pub(super) fn builder(hosts: Vec<String>) -> HostSelectorBuilder {
         HostSelectorBuilder::new(hosts)
     }
 
-    #[inline]
     pub(super) fn set_hosts(&self, hosts: Vec<String>) {
         self.hosts_updater.set_hosts(hosts)
     }
 
-    #[inline]
     pub(super) fn hosts(&self) -> Vec<String> {
         self.hosts_updater
             .hosts
@@ -467,7 +440,6 @@ impl HostSelector {
             .collect()
     }
 
-    #[inline]
     pub(super) fn all_hosts_crc32(&self) -> u32 {
         let mut hosts = self.hosts_updater.hosts.read().unwrap().to_owned();
         hosts.sort();
@@ -481,7 +453,6 @@ impl HostSelector {
         hasher.finalize()
     }
 
-    #[inline]
     pub(super) fn update_hosts(&self) -> bool {
         if self.hosts_updater.update_hosts() {
             info!("manual update hosts successfully");
@@ -580,7 +551,6 @@ impl HostSelector {
         }
     }
 
-    #[inline]
     pub(super) fn reward(&self, host: &str) {
         if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
             punished_info.continuous_punished_times = 0;
@@ -624,18 +594,15 @@ impl HostSelector {
         }
     }
 
-    #[inline]
     pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
         self.hosts_updater
             .increase_timeout_power_by(host, timeout_power)
     }
 
-    #[inline]
     pub(super) fn mark_connection_as_failed(&self, host: &str) {
         self.hosts_updater.mark_connection_as_failed(host)
     }
 
-    #[inline]
     pub(super) fn wrap_reader<'a, R: Read>(
         &'a self,
         reader: R,
@@ -650,7 +617,6 @@ impl HostSelector {
         }
     }
 
-    #[inline]
     fn is_satisfied_with(&self, punished_info: &PunishedInfo) -> bool {
         self.host_punisher.is_available(punished_info)
             && self.hosts_updater.current_timeout_power.load(Relaxed) >= punished_info.timeout_power
@@ -665,7 +631,6 @@ pub(super) struct ReaderWithTimeoutPower<'a, R: Read> {
 }
 
 impl<'a, R: Read> Read for ReaderWithTimeoutPower<'a, R> {
-    #[inline]
     fn read(&mut self, buf: &mut [u8]) -> IOResult<usize> {
         match self.reader.read(buf) {
             Ok(have_read) => Ok(have_read),
@@ -1069,7 +1034,6 @@ mod tests {
         struct AlwaysTimeoutReader;
 
         impl Read for AlwaysTimeoutReader {
-            #[inline]
             fn read(&mut self, _buf: &mut [u8]) -> IOResult<usize> {
                 Err(IOError::new(IOErrorKind::TimedOut, "always timed out"))
             }

@@ -1,5 +1,23 @@
-#![warn(missing_docs)]
-#![deny(unused_must_use)]
+#![deny(
+    missing_docs,
+    unused_must_use,
+    absolute_paths_not_starting_with_crate,
+    anonymous_parameters,
+    explicit_outlives_requirements,
+    keyword_idents,
+    macro_use_extern_crate,
+    meta_variable_misuse,
+    non_ascii_idents,
+    indirect_structural_match,
+    trivial_casts,
+    trivial_numeric_casts,
+    // unreachable_pub,
+    unused_crate_dependencies,
+    unused_extern_crates,
+    unused_import_braces,
+    // unused_lifetimes,
+    unused_qualifications
+)]
 
 //! # qiniu-download
 //!

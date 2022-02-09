@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 mod cache_dir;
 mod host_selector;
 mod query;

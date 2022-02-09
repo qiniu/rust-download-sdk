@@ -20,7 +20,6 @@ impl UploadPolicy {
         }
     }
 
-    #[inline]
     pub(crate) fn to_json(&self) -> String {
         serde_json::to_string(&self.value).unwrap()
     }

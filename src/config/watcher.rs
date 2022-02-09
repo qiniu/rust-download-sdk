@@ -22,7 +22,6 @@ static WATCHED_FILES: Lazy<DashSet<PathBuf>> = Lazy::new(Default::default);
 static WATCHED_DIRS: Lazy<DashMap<PathBuf, usize>> = Lazy::new(Default::default);
 static WATCHER: Lazy<RwLock<RecommendedWatcher>> = Lazy::new(|| RwLock::new(_start_watcher()));
 
-#[inline]
 pub(super) fn ensure_watches(watch_paths: &[PathBuf]) -> NotifyResult<()> {
     let watch_paths = watch_paths
         .iter()
@@ -46,7 +45,6 @@ pub(super) fn ensure_watches(watch_paths: &[PathBuf]) -> NotifyResult<()> {
     Ok(())
 }
 
-#[inline]
 fn add_to_watcher(watch_path: &Path) -> NotifyResult<()> {
     if WATCHED_FILES.insert(watch_path.to_owned()) {
         let watch_dir = parent_of(watch_path);
@@ -67,7 +65,6 @@ fn add_to_watcher(watch_path: &Path) -> NotifyResult<()> {
     Ok(())
 }
 
-#[inline]
 fn remove_from_watcher(path: &Path) -> NotifyResult<()> {
     if WATCHED_FILES.remove(path).is_some() {
         let watch_dir = parent_of(path);
@@ -83,7 +80,6 @@ fn remove_from_watcher(path: &Path) -> NotifyResult<()> {
     Ok(())
 }
 
-#[inline]
 pub(super) fn unwatch_all() -> NotifyResult<()> {
     {
         let mut watcher = WATCHER.write().unwrap();
@@ -100,30 +96,25 @@ pub(super) fn unwatch_all() -> NotifyResult<()> {
     Ok(())
 }
 
-#[inline]
 #[cfg(test)]
 pub(super) fn watch_dirs_count() -> usize {
     WATCHED_DIRS.len()
 }
 
-#[inline]
 #[cfg(test)]
 pub(super) fn watch_files_count() -> usize {
     WATCHED_FILES.len()
 }
 
-#[inline]
 fn canonicalize(path: &Path) -> IOResult<PathBuf> {
     path.canonicalize()
         .tap_err(|err| warn!("Failed to canonicalize config path {:?}: {:?}", path, err))
 }
 
-#[inline]
 fn parent_of(path: &Path) -> PathBuf {
     path.parent().unwrap_or_else(|| Path::new("/")).to_owned()
 }
 
-#[inline]
 fn _start_watcher() -> RecommendedWatcher {
     static CONFIG_WATCHER_THREAD: OnceCell<JoinHandle<()>> = OnceCell::new();
 
@@ -148,7 +139,6 @@ fn _start_watcher() -> RecommendedWatcher {
         }
     }
 
-    #[inline]
     fn setup_config_watcher_inner(rx: Receiver<DebouncedEvent>) -> ! {
         loop {
             match rx.recv() {
@@ -181,7 +171,6 @@ fn _start_watcher() -> RecommendedWatcher {
         }
     }
 
-    #[inline]
     fn event_received(event: &DebouncedEvent) {
         info!("Received event {:?} from Qiniu config file watcher", event);
         reload_config(true);

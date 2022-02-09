@@ -38,7 +38,7 @@ use url::Url;
 
 /// 对象范围下载器
 #[derive(Debug)]
-pub struct RangeReader {
+pub(crate) struct RangeReader {
     inner: Arc<RangeReaderInner>,
     key: String,
 }
@@ -59,7 +59,7 @@ pub(crate) struct RangeReaderInner {
 
 #[derive(Debug)]
 /// 对象范围下载构建器
-pub struct RangeReaderBuilder {
+pub(crate) struct RangeReaderBuilder {
     credential: Credential,
     bucket: String,
     key: String,
@@ -91,8 +91,8 @@ impl RangeReaderBuilder {
     /// * `key` - 对象名称
     /// * `credential` - 存储空间所在账户的凭证
     /// * `io_urls` - 七牛 IO 服务器 URL 列表
-    #[inline]
-    pub fn new(
+
+    pub(crate) fn new(
         bucket: impl Into<String>,
         key: impl Into<String>,
         credential: Credential,
@@ -124,64 +124,64 @@ impl RangeReaderBuilder {
     }
 
     /// 设置七牛 UC 服务器 URL 列表
-    #[inline]
-    pub fn uc_urls(mut self, urls: Vec<String>) -> Self {
+
+    pub(crate) fn uc_urls(mut self, urls: Vec<String>) -> Self {
         self.uc_urls = urls;
         self
     }
 
     /// 设置七牛监控服务器 URL 列表
-    #[inline]
-    pub fn monitor_urls(mut self, urls: Vec<String>) -> Self {
+
+    pub(crate) fn monitor_urls(mut self, urls: Vec<String>) -> Self {
         self.monitor_urls = urls;
         self
     }
 
     /// 设置对象下载最大尝试次数
-    #[inline]
-    pub fn io_tries(mut self, tries: usize) -> Self {
+
+    pub(crate) fn io_tries(mut self, tries: usize) -> Self {
         self.io_tries = tries;
         self
     }
 
     /// 设置 UC 查询的最大尝试次数
-    #[inline]
-    pub fn uc_tries(mut self, tries: usize) -> Self {
+
+    pub(crate) fn uc_tries(mut self, tries: usize) -> Self {
         self.uc_tries = tries;
         self
     }
 
     /// 设置打点记录上传的最大尝试次数
-    #[inline]
-    pub fn dot_tries(mut self, tries: usize) -> Self {
+
+    pub(crate) fn dot_tries(mut self, tries: usize) -> Self {
         self.dot_tries = Some(tries);
         self
     }
 
     /// 设置 UC 查询的频率
-    #[inline]
-    pub fn update_interval(mut self, interval: Duration) -> Self {
+
+    pub(crate) fn update_interval(mut self, interval: Duration) -> Self {
         self.update_interval = Some(interval);
         self
     }
 
     /// 设置域名访问失败后的惩罚时长
-    #[inline]
-    pub fn punish_duration(mut self, duration: Duration) -> Self {
+
+    pub(crate) fn punish_duration(mut self, duration: Duration) -> Self {
         self.punish_duration = Some(duration);
         self
     }
 
     /// 设置域名访问的基础超时时长
-    #[inline]
-    pub fn base_timeout(mut self, timeout: Duration) -> Self {
+
+    pub(crate) fn base_timeout(mut self, timeout: Duration) -> Self {
         self.base_timeout = Some(timeout);
         self
     }
 
     /// 设置域名访问的连接时长
-    #[inline]
-    pub fn connect_timeout(mut self, timeout: Duration) -> Self {
+
+    pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
         self.dial_timeout = Some(timeout);
         self
     }
@@ -189,8 +189,8 @@ impl RangeReaderBuilder {
     /// 设置失败域名的最大重试次数
     ///
     /// 一旦一个域名的被惩罚次数超过限制，则域名选择器不会选择该域名，除非被惩罚的域名比例超过上限，或惩罚时长超过指定时长
-    #[inline]
-    pub fn max_punished_times(mut self, max_times: usize) -> Self {
+
+    pub(crate) fn max_punished_times(mut self, max_times: usize) -> Self {
         self.max_punished_times = Some(max_times);
         self
     }
@@ -198,57 +198,57 @@ impl RangeReaderBuilder {
     /// 设置被惩罚的域名最大比例
     ///
     /// 域名选择器在搜索域名时，一旦被跳过的域名比例大于该值，则下一个域名将被选中，不管该域名是否也被惩罚。一旦该域名成功，则惩罚将立刻被取消
-    #[inline]
-    pub fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
+
+    pub(crate) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
         self.max_punished_hosts_percent = Some(percent);
         self
     }
 
     /// 设置是否使用 getfile API 下载
-    #[inline]
-    pub fn use_getfile_api(mut self, use_getfile_api: bool) -> Self {
+
+    pub(crate) fn use_getfile_api(mut self, use_getfile_api: bool) -> Self {
         self.use_getfile_api = use_getfile_api;
         self
     }
 
     /// 设置是否对 key 进行格式化
-    #[inline]
-    pub fn normalize_key(mut self, normalize_key: bool) -> Self {
+
+    pub(crate) fn normalize_key(mut self, normalize_key: bool) -> Self {
         self.normalize_key = normalize_key;
         self
     }
 
     /// 设置私有空间下载 URL 有效期，如果为 None，则使用公开空间下载 URL
-    #[inline]
-    pub fn private_url_lifetime(mut self, private_url_lifetime: Option<Duration>) -> Self {
+
+    pub(crate) fn private_url_lifetime(mut self, private_url_lifetime: Option<Duration>) -> Self {
         self.private_url_lifetime = private_url_lifetime;
         self
     }
 
     /// 设置打点记录上传频率
-    #[inline]
-    pub fn dot_interval(mut self, dot_interval: Duration) -> Self {
+
+    pub(crate) fn dot_interval(mut self, dot_interval: Duration) -> Self {
         self.dot_interval = Some(dot_interval);
         self
     }
 
     /// 设置打点记录本地缓存文件尺寸上限
-    #[inline]
-    pub fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
+
+    pub(crate) fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
         self.max_dot_buffer_size = Some(max_dot_buffer_size);
         self
     }
 
     /// 设置是否使用 HTTPS 协议来访问 IO 服务器
-    #[inline]
-    pub fn use_https(mut self, use_https: bool) -> Self {
+
+    pub(crate) fn use_https(mut self, use_https: bool) -> Self {
         self.use_https = use_https;
         self
     }
 
     /// 构建范围下载器
-    #[inline]
-    pub fn build(self) -> RangeReader {
+
+    pub(crate) fn build(self) -> RangeReader {
         let (inner, key) = self.build_inner_and_key();
         RangeReader { inner, key }
     }
@@ -322,7 +322,6 @@ impl RangeReaderBuilder {
         }
 
         impl HostSelectorParams {
-            #[inline]
             fn set_builder(&self, mut builder: HostSelectorBuilder) -> HostSelectorBuilder {
                 if let Some(update_interval) = self.update_interval {
                     builder = builder.update_interval(update_interval);
@@ -343,7 +342,6 @@ impl RangeReaderBuilder {
             }
         }
 
-        #[inline]
         fn make_uc_host_selector(
             uc_urls: Vec<String>,
             params: &HostSelectorParams,
@@ -351,7 +349,6 @@ impl RangeReaderBuilder {
             params.set_builder(HostSelector::builder(uc_urls)).build()
         }
 
-        #[inline]
         fn make_io_selector(
             io_urls: Vec<String>,
             io_querier: Option<HostsQuerier>,
@@ -380,8 +377,8 @@ impl RangeReaderBuilder {
     ///
     /// * `key` - 对象名称
     /// * `config` - 下载配置
-    #[inline]
-    pub fn from_config(key: impl Into<String>, config: &Config) -> Self {
+
+    pub(crate) fn from_config(key: impl Into<String>, config: &Config) -> Self {
         build_range_reader_builder_from_config(key.into(), config)
     }
 
@@ -389,16 +386,16 @@ impl RangeReaderBuilder {
     /// # Arguments
     ///
     /// * `key` - 对象名称
-    #[inline]
-    pub fn from_env(key: impl Into<String>) -> Option<Self> {
+
+    pub(crate) fn from_env(key: impl Into<String>) -> Option<Self> {
         build_range_reader_builder_from_env(key.into(), false)
     }
 }
 
 impl RangeReader {
     /// 创建范围下载构建器
-    #[inline]
-    pub fn builder(
+
+    pub(crate) fn builder(
         bucket: impl Into<String>,
         key: impl Into<String>,
         credential: Credential,
@@ -412,8 +409,8 @@ impl RangeReader {
     ///
     /// * `key` - 对象名称
     /// * `config` - 下载配置
-    #[inline]
-    pub fn from_config(key: impl Into<String>, config: &Config) -> Self {
+
+    pub(crate) fn from_config(key: impl Into<String>, config: &Config) -> Self {
         RangeReaderBuilder::from_config(key, config).build()
     }
 
@@ -421,8 +418,8 @@ impl RangeReader {
     /// # Arguments
     ///
     /// * `key` - 对象名称
-    #[inline]
-    pub fn from_env(key: impl Into<String>) -> Option<Self> {
+
+    pub(crate) fn from_env(key: impl Into<String>) -> Option<Self> {
         let key = key.into();
         with_current_qiniu_config(|config| {
             config.and_then(|config| {
@@ -441,12 +438,12 @@ impl RangeReader {
     /// 主动更新域名列表
     ///
     /// 如果返回为 true 表示更新成功，否则返回 false
-    pub fn update_urls(&self) -> bool {
+    pub(crate) fn update_urls(&self) -> bool {
         self.inner.io_selector.update_hosts()
     }
 
     /// 获取当前可用的 IO 节点的域名
-    pub fn io_urls(&self) -> Vec<String> {
+    pub(crate) fn io_urls(&self) -> Vec<String> {
         return self
             .inner
             .io_selector
@@ -455,7 +452,6 @@ impl RangeReader {
             .map(|host| normalize_host(host, self.inner.use_https))
             .collect();
 
-        #[inline]
         fn normalize_host(host: &str, use_https: bool) -> String {
             if host.contains("://") {
                 host.to_string()
@@ -541,7 +537,7 @@ impl RangeReader {
     /// 读取文件的多个区域，返回每个区域对应的数据
     /// # Arguments
     /// * `range` - 区域列表，每个区域有开始偏移量和区域长度组成
-    pub fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
+    pub(crate) fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(ranges));
         let begin_at = Instant::now();
 
@@ -727,7 +723,7 @@ impl RangeReader {
     }
 
     /// 判定当前对象是否存在
-    pub fn exist(&self) -> IOResult<bool> {
+    pub(crate) fn exist(&self) -> IOResult<bool> {
         let begin_at = Instant::now();
         self.with_retries(
             Method::HEAD,
@@ -780,7 +776,7 @@ impl RangeReader {
     }
 
     /// 获取当前对象的文件大小
-    pub fn file_size(&self) -> IOResult<u64> {
+    pub(crate) fn file_size(&self) -> IOResult<u64> {
         let begin_at = Instant::now();
         self.with_retries(
             Method::HEAD,
@@ -835,14 +831,14 @@ impl RangeReader {
     }
 
     /// 下载当前对象到内存缓冲区中
-    pub fn download(&self) -> IOResult<Vec<u8>> {
+    pub(crate) fn download(&self) -> IOResult<Vec<u8>> {
         let mut bytes = Cursor::new(Vec::new());
         self.download_to(&mut bytes)?;
         Ok(bytes.into_inner())
     }
 
     /// 下载当前对象到指定输出流中
-    pub fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
+    pub(crate) fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let init_start_from = writer.seek(SeekFrom::End(0))?;
         let mut start_from = init_start_from;
         let begin_at = Instant::now();
@@ -906,7 +902,7 @@ impl RangeReader {
     }
 
     /// 下载对象的最后指定个字节到缓冲区中，返回实际下载的字节数和整个文件的大小
-    pub fn read_last_bytes(&self, buf: &mut [u8]) -> IOResult<(u64, u64)> {
+    pub(crate) fn read_last_bytes(&self, buf: &mut [u8]) -> IOResult<(u64, u64)> {
         let size = buf.len() as u64;
         let mut cursor = Cursor::new(buf);
         let range = format!("bytes=-{}", size);
@@ -971,7 +967,6 @@ impl RangeReader {
         )
     }
 
-    #[inline]
     fn wrap_reader<'a, R: 'a + Read>(
         &'a self,
         source: R,
@@ -1123,7 +1118,6 @@ impl RangeReader {
             }
         }
 
-        #[inline]
         fn sleep_before_retry(tries: usize) {
             if tries >= 3 {
                 sleep(Duration::from_secs(tries as u64));
@@ -1131,7 +1125,6 @@ impl RangeReader {
         }
     }
 
-    #[inline]
     fn punish_if_needed(&self, host: &str, timeout_power: usize, err: &ReqwestError) {
         if err.is_timeout() {
             self.inner
@@ -1143,7 +1136,7 @@ impl RangeReader {
     }
 }
 
-pub trait WriteSeek: Write + Seek {}
+pub(crate) trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
 
 #[cold]

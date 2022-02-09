@@ -110,12 +110,10 @@ fn load_config() -> Option<Configurable> {
     }
 }
 
-#[inline]
 fn init_config() -> RwLock<Option<Configurable>> {
     RwLock::new(load_config().tap(|config| ensure_watches_for(config.as_ref())))
 }
 
-#[inline]
 fn ensure_watches_for(config: Option<&Configurable>) {
     if env::var_os(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV).is_none() {
         if let Some(config) = config {
@@ -126,7 +124,6 @@ fn ensure_watches_for(config: Option<&Configurable>) {
     }
 }
 
-#[inline]
 fn ensure_http_clients_for(config: Option<&Configurable>) {
     if let Some(config) = config {
         ensure_http_clients(&config.timeouts_set());
@@ -135,14 +132,12 @@ fn ensure_http_clients_for(config: Option<&Configurable>) {
     }
 }
 
-#[inline]
 fn reload_config(migrate_callback: bool) {
     if let Some(config) = load_config() {
         set_config_and_reload(config, migrate_callback)
     }
 }
 
-#[inline]
 fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
     with_current_qiniu_config_mut(|current| {
         if migrate_callback {
@@ -1103,7 +1098,6 @@ mod tests {
     struct ResetFinally;
 
     impl Drop for ResetFinally {
-        #[inline]
         fn drop(&mut self) {
             reset_static_vars();
             unwatch_all().unwrap();
@@ -1113,7 +1107,6 @@ mod tests {
     struct QiniuHotReloadingEnvGuard;
 
     impl QiniuHotReloadingEnvGuard {
-        #[inline]
         fn new() -> Self {
             env::set_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV, "1");
             Self
@@ -1121,7 +1114,6 @@ mod tests {
     }
 
     impl Drop for QiniuHotReloadingEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV)
         }
@@ -1130,7 +1122,6 @@ mod tests {
     struct QiniuEnvGuard;
 
     impl QiniuEnvGuard {
-        #[inline]
         fn new(val: &OsStr) -> Self {
             env::set_var(QINIU_ENV, val);
             Self
@@ -1138,7 +1129,6 @@ mod tests {
     }
 
     impl Drop for QiniuEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_ENV)
         }
@@ -1147,7 +1137,6 @@ mod tests {
     struct QiniuMultiEnvGuard;
 
     impl QiniuMultiEnvGuard {
-        #[inline]
         fn new(val: &OsStr) -> Self {
             env::set_var(QINIU_MULTI_ENV, val);
             Self
@@ -1155,7 +1144,6 @@ mod tests {
     }
 
     impl Drop for QiniuMultiEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_MULTI_ENV)
         }

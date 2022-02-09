@@ -710,7 +710,7 @@ mod tests {
             let retrier_punished_2 = retrier_punished_2.to_owned();
             try_with_timeout(
                 move |count| {
-                    counter.store(count, Relaxed);
+                    counter.store(count + 1, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
                     match count {
@@ -749,7 +749,7 @@ mod tests {
             let retrier_punished_2 = retrier_punished_2.to_owned();
             try_with_timeout(
                 move |count| {
-                    counter.store(count, Relaxed);
+                    counter.store(count + 1, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
                     match count {
@@ -778,13 +778,10 @@ mod tests {
         assert!(!retrier_punished_2.load(Relaxed));
         assert_eq!(counter.load(Relaxed), 2);
 
-        counter.store(0, Relaxed);
         let result = {
-            let counter = counter.to_owned();
             try_with_timeout(
                 move |count| {
-                    counter.store(count, Relaxed);
-                    assert!(count < 6);
+                    assert!(count < 5);
                     FakedRetrier::new(
                         Duration::from_millis(1000),
                         Result3::Ok(count),

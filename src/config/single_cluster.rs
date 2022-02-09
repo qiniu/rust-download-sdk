@@ -63,12 +63,10 @@ impl Config {
         ConfigBuilder::new(access_key, secret_key, bucket, io_urls)
     }
 
-    #[inline]
     pub(super) fn with_key<T>(&self, _key: &str, f: impl FnOnce(&Config) -> T) -> Option<T> {
         Some(f(self))
     }
 
-    #[inline]
     pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ClustersConfigParseError> {
         match path.extension().and_then(|s| s.to_str()) {
             Some("toml") => toml::from_slice(bytes).map_err(|err| err.into()),
@@ -305,18 +303,15 @@ impl Config {
         self
     }
 
-    #[inline]
     pub(super) fn original_path(&self) -> Option<&Path> {
         self.extra.original_path.as_ref().map(|p| p.as_ref())
     }
 
-    #[inline]
     #[allow(dead_code)]
     pub(super) fn original_path_mut(&mut self) -> &mut Option<PathBuf> {
         &mut self.extra.original_path
     }
 
-    #[inline]
     pub(super) fn config_paths(&self) -> Vec<PathBuf> {
         self.extra
             .original_path
@@ -325,14 +320,12 @@ impl Config {
             .unwrap_or_default()
     }
 
-    #[inline]
     pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
         let mut set = HashSet::with_capacity(1);
         set.insert(Timeouts::from(self));
         set
     }
 
-    #[inline]
     pub(crate) fn get_or_init_range_reader_inner(
         &self,
         f: impl FnOnce() -> Arc<RangeReaderInner>,
@@ -340,7 +333,6 @@ impl Config {
         self.extra.range_reader_inner.get_or_init(f).to_owned()
     }
 
-    #[inline]
     pub(crate) async fn get_or_init_async_range_reader_inner<
         F: FnOnce() -> Fut,
         Fut: Future<Output = Arc<AsyncRangeReaderInner>>,
@@ -355,7 +347,6 @@ impl Config {
             .to_owned()
     }
 
-    #[inline]
     fn uninit_range_reader_inner(&mut self) {
         self.extra.range_reader_inner.take();
         self.extra.async_range_reader_inner.take();

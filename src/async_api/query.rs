@@ -38,7 +38,6 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    #[inline]
     fn new(ak: Box<str>, bucket: Box<str>, hosts_crc32: u32) -> Self {
         Self {
             ak,
@@ -49,7 +48,6 @@ impl CacheKey {
 }
 
 impl Serialize for CacheKey {
-    #[inline]
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(&format!(
             "cache-key-v2:{}:{}:{}",
@@ -65,7 +63,6 @@ struct CacheKeyVisitor;
 impl<'de> Visitor<'de> for CacheKeyVisitor {
     type Value = CacheKey;
 
-    #[inline]
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("Key of cache")
     }
@@ -96,7 +93,6 @@ impl<'de> Visitor<'de> for CacheKeyVisitor {
 }
 
 impl<'de> Deserialize<'de> for CacheKey {
-    #[inline]
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         d.deserialize_str(CacheKeyVisitor)
     }
@@ -134,7 +130,6 @@ pub(super) struct HostsQuerier {
 }
 
 impl HostsQuerier {
-    #[inline]
     pub(super) fn new(
         uc_selector: HostSelector,
         uc_tries: usize,
@@ -149,7 +144,6 @@ impl HostsQuerier {
         }
     }
 
-    #[inline]
     pub(super) async fn query_for_io_urls(
         &self,
         ak: &str,
@@ -167,7 +161,6 @@ impl HostsQuerier {
             .map(|domain| normalize_domain(domain, use_https))
             .collect());
 
-        #[inline]
         fn normalize_domain(domain: &str, use_https: bool) -> String {
             if domain.contains("://") {
                 domain.to_string()
@@ -478,7 +471,6 @@ async fn save_cache() -> IoResult<()> {
     }
     return Ok(());
 
-    #[inline]
     async fn _save_cache(cache_file_path: &Path) -> anyhow::Result<()> {
         let mut file = OpenOptions::new()
             .write(true)
@@ -551,7 +543,6 @@ mod tests {
     const SECRET_KEY: &str = "abcdefghijklmnioqrstuv";
     const BUCKET_NAME: &str = "test-bucket";
 
-    #[inline]
     fn get_credential() -> Credential {
         Credential::new(ACCESS_KEY, SECRET_KEY)
     }

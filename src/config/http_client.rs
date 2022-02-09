@@ -15,19 +15,16 @@ static ASYNC_HTTP_CLIENTS: Lazy<DashMap<Timeouts, Arc<AsyncHttpClient>>> =
     Lazy::new(Default::default);
 
 impl Timeouts {
-    #[inline]
     #[cfg(test)]
     pub(crate) fn default_http_client() -> Arc<HttpClient> {
         Self::new(None, None).http_client()
     }
 
-    #[inline]
     #[cfg(test)]
     pub(crate) fn default_async_http_client() -> Arc<AsyncHttpClient> {
         Self::new(None, None).async_http_client()
     }
 
-    #[inline]
     pub(crate) fn new(base_timeout: Option<Duration>, dial_timeout: Option<Duration>) -> Self {
         Self {
             base_timeout: base_timeout
@@ -39,7 +36,6 @@ impl Timeouts {
         }
     }
 
-    #[inline]
     pub(crate) fn http_client(&self) -> Arc<HttpClient> {
         return HTTP_CLIENTS
             .entry(self.to_owned())
@@ -61,7 +57,6 @@ impl Timeouts {
         }
     }
 
-    #[inline]
     pub(crate) fn async_http_client(&self) -> Arc<AsyncHttpClient> {
         return ASYNC_HTTP_CLIENTS
             .entry(self.to_owned())
@@ -84,13 +79,11 @@ impl Timeouts {
 }
 
 impl<'a> From<&'a SingleClusterConfig> for Timeouts {
-    #[inline]
     fn from(config: &'a SingleClusterConfig) -> Self {
         Self::new(config.base_timeout(), config.connect_timeout())
     }
 }
 
-#[inline]
 pub(super) fn ensure_http_clients(set: &HashSet<Timeouts>) {
     HTTP_CLIENTS.retain(|key, _| set.contains(key))
 }

@@ -828,7 +828,7 @@ impl AsyncRangeReader {
                     let buf_cursor = buf_cursor.to_owned();
                     async move {
                         let mut buf_cursor = buf_cursor.lock().await;
-                        let start_from = buf_cursor.position() as u64;
+                        let start_from = buf_cursor.position();
                         debug!(
                             "{{{}}} [{}] download_to url: {}, req_id: {:?}, start_from: {}",
                             async_task_id, tries, download_url, req_id, start_from

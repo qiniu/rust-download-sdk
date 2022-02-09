@@ -9,7 +9,6 @@ mod safe {
     pub(in super::super) static QINIU_CONFIG: OnceCell<RwLock<Option<Configurable>>> =
         OnceCell::new();
 
-    #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
         QINIU_CONFIG.get_or_init(init_config)
     }
@@ -25,7 +24,6 @@ mod not_safe {
     pub(in super::super) static mut QINIU_CONFIG: OnceCell<RwLock<Option<Configurable>>> =
         OnceCell::new();
 
-    #[inline]
     pub(in super::super) fn qiniu_config() -> &'static RwLock<Option<Configurable>> {
         unsafe { &mut QINIU_CONFIG }.get_or_init(init_config)
     }

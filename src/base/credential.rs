@@ -23,7 +23,6 @@ impl Credential {
         }
     }
 
-    #[inline]
     pub(crate) fn access_key(&self) -> &str {
         &self.access_key
     }

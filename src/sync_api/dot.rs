@@ -238,20 +238,17 @@ impl DotterInner {
         self.buffered_records.merge_with_record(record);
     }
 
-    #[inline]
     fn fast_punish(&self) {
         self.buffered_records
             .merge_with_record(DotRecord::punished());
     }
 
-    #[inline]
     fn flush_to_file(&self, buffered_file: &mut File) -> IOResult<()> {
         self.buffered_records
             .retain(|_, r| write_to_file(r, buffered_file).is_err());
 
         return Ok(());
 
-        #[inline]
         fn write_to_file(record: &DotRecord, file: &mut File) -> anyhow::Result<()> {
             writeln!(file, "{}", serde_json::to_string(record)?)
                 .tap_err(|err| warn!("the dot file is failed to write: {:?}", err))?;
@@ -440,12 +437,10 @@ pub(super) enum DotRecordKey {
 }
 
 impl DotRecordKey {
-    #[inline]
     pub(super) fn new(dot_type: DotType, api_name: ApiName) -> Self {
         Self::APICalls { dot_type, api_name }
     }
 
-    #[inline]
     pub(super) fn punished() -> Self {
         Self::PunishedCount
     }
@@ -476,7 +471,6 @@ pub(super) struct PunishedCountDotRecord {
 }
 
 impl DotRecord {
-    #[inline]
     fn new(
         dot_type: DotType,
         api_name: ApiName,
@@ -495,12 +489,10 @@ impl DotRecord {
         })
     }
 
-    #[inline]
     fn punished() -> Self {
         Self::PunishedCount(PunishedCountDotRecord { punished_count: 1 })
     }
 
-    #[inline]
     pub(super) fn key(&self) -> DotRecordKey {
         match self {
             Self::APICalls(record) => DotRecordKey::new(record.dot_type, record.api_name),
@@ -509,7 +501,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn dot_type(&self) -> Option<DotType> {
         match self {
             Self::APICalls(record) => Some(record.dot_type),
@@ -518,7 +510,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn api_name(&self) -> Option<ApiName> {
         match self {
             Self::APICalls(record) => Some(record.api_name),
@@ -527,7 +519,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn success_count(&self) -> Option<usize> {
         match self {
             Self::APICalls(record) => Some(record.success_count),
@@ -536,7 +528,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn success_avg_elapsed_duration_ms(&self) -> Option<u128> {
         match self {
             Self::APICalls(record) => Some(record.success_avg_elapsed_duration),
@@ -545,7 +537,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn failed_count(&self) -> Option<usize> {
         match self {
             Self::APICalls(record) => Some(record.failed_count),
@@ -554,7 +546,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn failed_avg_elapsed_duration_ms(&self) -> Option<u128> {
         match self {
             Self::APICalls(record) => Some(record.failed_avg_elapsed_duration),
@@ -563,7 +555,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn punished_count(&self) -> Option<usize> {
         match self {
             Self::PunishedCount(record) => Some(record.punished_count),
@@ -596,7 +588,7 @@ pub(super) struct DotRecords {
 
 impl DotRecords {
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn records(&self) -> &[DotRecord] {
         self.records.as_ref()
     }
@@ -640,7 +632,6 @@ impl DotRecordsMap {
             })
             .or_insert(record);
 
-        #[inline]
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
         }
@@ -664,7 +655,6 @@ impl DotRecordsMap {
 impl Deref for DotRecordsMap {
     type Target = HashMap<DotRecordKey, DotRecord>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.m
     }
@@ -708,7 +698,6 @@ impl DotRecordsDashMap {
             })
             .or_insert(record);
 
-        #[inline]
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
         }
@@ -732,7 +721,6 @@ impl DotRecordsDashMap {
 impl Deref for DotRecordsDashMap {
     type Target = DashMap<DotRecordKey, DotRecord>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.m
     }
@@ -799,7 +787,6 @@ mod tests {
     }
     use guard::DottingDisableGuard;
 
-    #[inline]
     fn get_credential() -> Credential {
         Credential::new(ACCESS_KEY, SECRET_KEY)
     }

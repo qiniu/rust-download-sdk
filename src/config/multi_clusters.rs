@@ -59,12 +59,10 @@ impl MultipleClustersConfig {
         self.select_config = callback;
     }
 
-    #[inline]
     pub(super) fn with_key<T>(&self, key: &str, f: impl FnOnce(&Config) -> T) -> Option<T> {
         (self.select_config)(&self.configs, key).map(f)
     }
 
-    #[inline]
     pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ClustersConfigParseError> {
         match path.extension().and_then(|s| s.to_str()) {
             Some("toml") => toml::from_slice(bytes).map_err(|err| err.into()),
@@ -76,7 +74,6 @@ impl MultipleClustersConfig {
         })
     }
 
-    #[inline]
     pub(super) fn config_paths(&self) -> Vec<PathBuf> {
         let mut paths = self
             .original_path
@@ -92,7 +89,6 @@ impl MultipleClustersConfig {
         paths
     }
 
-    #[inline]
     pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
         self.configs
             .iter()
@@ -104,7 +100,6 @@ impl MultipleClustersConfig {
 impl TryFrom<HashMap<String, PathBuf>> for MultipleClustersConfig {
     type Error = MultipleClustersConfigParseError;
 
-    #[inline]
     fn try_from(configs: HashMap<String, PathBuf>) -> Result<Self, Self::Error> {
         Ok(Self {
             configs: configs
@@ -159,7 +154,6 @@ impl fmt::Debug for MultipleClustersConfig {
     }
 }
 
-#[inline]
 fn default_select_config<'a>(
     configs: &'a HashMap<String, Config>,
     key: &str,

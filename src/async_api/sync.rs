@@ -553,48 +553,50 @@ mod tests {
     async fn test_synced_read_at() -> anyhow::Result<()> {
         env_logger::try_init().ok();
 
-        let io_routes =
-            path!("file")
-                .and(header::value(RANGE.as_str()))
-                .map(|range: HeaderValue| {
-                    let from: u64;
-                    let to: u64;
-                    scan_text!(range.to_str().unwrap().bytes() => "bytes={}-{}", from, to);
-                    let body = vec![from as u8; 1024];
-                    Response::new(body.into())
-                });
+        let io_routes = path!("file" / usize)
+            .and(header::value(RANGE.as_str()))
+            .map(|size: usize, range: HeaderValue| {
+                let from: u64;
+                let to: u64;
+                scan_text!(range.to_str().unwrap().bytes() => "bytes={}-{}", from, to);
+                let body = vec![from as u8; size];
+                Response::new(body.into())
+            });
 
         starts_with_server!(io_addr, io_routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", io_addr)];
-                let downloader = RangeReaderBuilder::new(
-                    "bucket".to_owned(),
-                    "file".to_owned(),
-                    get_credential(),
-                    io_urls,
-                )
-                .use_getfile_api(false)
-                .normalize_key(true)
-                .base_timeout(Duration::from_millis(100))
-                .build();
 
-                let threads = (0..=255u64)
-                    .map(|i| {
-                        let downloader = downloader.to_owned();
-                        spawn_thread(move || {
-                            let mut buf = vec![0u8; 1024];
-                            assert_eq!(downloader.read_at(i, &mut buf)?, 1024);
-                            Ok::<_, anyhow::Error>(buf)
+                for (size, base_timeout_ms) in [(1024, 100), (1024 * 1024, 1000)] {
+                    let downloader = RangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        format!("file/{}", size),
+                        get_credential(),
+                        io_urls.to_owned(),
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true)
+                    .base_timeout(Duration::from_millis(base_timeout_ms))
+                    .build();
+
+                    let threads = (0..=255u64)
+                        .map(|i| {
+                            let downloader = downloader.to_owned();
+                            spawn_thread(move || {
+                                let mut buf = vec![0u8; size];
+                                assert_eq!(downloader.read_at(i, &mut buf)?, size);
+                                Ok::<_, anyhow::Error>(buf)
+                            })
                         })
-                    })
-                    .collect::<Vec<_>>();
+                        .collect::<Vec<_>>();
 
-                for (i, response) in threads
-                    .into_iter()
-                    .map(|thread| thread.join().unwrap())
-                    .enumerate()
-                {
-                    assert_eq!(response.unwrap(), vec![i as u8; 1024]);
+                    for (i, response) in threads
+                        .into_iter()
+                        .map(|thread| thread.join().unwrap())
+                        .enumerate()
+                    {
+                        assert_eq!(response.unwrap(), vec![i as u8; size]);
+                    }
                 }
             })
             .await?;
