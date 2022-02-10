@@ -2,11 +2,10 @@
 
 use super::{
     super::{
-        base::credential::Credential,
+        base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
         config::{
-            build_async_range_reader_builder_from_config,
-            build_async_range_reader_builder_from_env_with_extra_options,
-            with_current_qiniu_config, Config, Timeouts,
+            build_async_range_reader_builder_from_config, with_current_qiniu_config, Config,
+            Timeouts,
         },
     },
     dot::{ApiName, DotType, Dotter},
@@ -14,7 +13,7 @@ use super::{
     query::HostsQuerier,
     req_id::{get_req_id, REQUEST_ID_HEADER},
 };
-use async_once_cell::Lazy;
+use async_once_cell::Lazy as AsyncLazy;
 use futures::{AsyncReadExt, TryStreamExt};
 use hyper::HeaderMap;
 use log::{debug, info, warn};
@@ -91,190 +90,71 @@ pub fn sign_download_url_with_lifetime(
     sign_download_url_with_deadline(c, url, deadline)
 }
 
-// TODO: 重新考虑下是否应该是 pub(crate)
-
 #[derive(Debug)]
-pub(crate) struct AsyncRangeReaderBuilder {
-    credential: Credential,
-    bucket: String,
-    key: String,
-    io_urls: Vec<String>,
-    uc_urls: Vec<String>,
-    monitor_urls: Vec<String>,
-    uc_tries: usize,
-    update_interval: Option<Duration>,
-    punish_duration: Option<Duration>,
-    base_timeout: Option<Duration>,
-    dial_timeout: Option<Duration>,
-    max_punished_times: Option<usize>,
-    max_punished_hosts_percent: Option<u8>,
-    use_getfile_api: bool,
-    normalize_key: bool,
-    private_url_lifetime: Option<Duration>,
-    use_https: bool,
-    dot_tries: Option<usize>,
-    dot_interval: Option<Duration>,
-    max_dot_buffer_size: Option<u64>,
+pub(crate) struct AsyncRangeReaderBuilder(BaseRangeReaderBuilder);
+
+impl From<BaseRangeReaderBuilder> for AsyncRangeReaderBuilder {
+    fn from(builder: BaseRangeReaderBuilder) -> Self {
+        Self(builder)
+    }
+}
+
+impl From<AsyncRangeReaderBuilder> for BaseRangeReaderBuilder {
+    fn from(builder: AsyncRangeReaderBuilder) -> Self {
+        builder.0
+    }
 }
 
 impl AsyncRangeReaderBuilder {
-    pub(crate) fn new(
-        bucket: String,
-        key: String,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> Self {
-        Self {
-            bucket,
-            key,
-            credential,
-            io_urls,
-            uc_urls: vec![],
-            monitor_urls: vec![],
-            uc_tries: 10,
-            update_interval: None,
-            punish_duration: None,
-            base_timeout: None,
-            dial_timeout: None,
-            max_punished_times: None,
-            max_punished_hosts_percent: None,
-            use_getfile_api: true,
-            normalize_key: false,
-            private_url_lifetime: None,
-            use_https: false,
-            dot_tries: None,
-            dot_interval: None,
-            max_dot_buffer_size: None,
-        }
-    }
-
-    pub(crate) fn uc_urls(mut self, urls: Vec<String>) -> Self {
-        self.uc_urls = urls;
-        self
-    }
-
-    pub(crate) fn monitor_urls(mut self, urls: Vec<String>) -> Self {
-        self.monitor_urls = urls;
-        self
-    }
-
-    pub(crate) fn uc_tries(mut self, tries: usize) -> Self {
-        self.uc_tries = tries;
-        self
-    }
-
-    pub(crate) fn dot_tries(mut self, tries: usize) -> Self {
-        self.dot_tries = Some(tries);
-        self
-    }
-
-    pub(crate) fn update_interval(mut self, interval: Duration) -> Self {
-        self.update_interval = Some(interval);
-        self
-    }
-
-    pub(crate) fn punish_duration(mut self, duration: Duration) -> Self {
-        self.punish_duration = Some(duration);
-        self
-    }
-
-    pub(crate) fn base_timeout(mut self, timeout: Duration) -> Self {
-        self.base_timeout = Some(timeout);
-        self
-    }
-
-    pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.dial_timeout = Some(timeout);
-        self
-    }
-
-    pub(crate) fn max_punished_times(mut self, max_times: usize) -> Self {
-        self.max_punished_times = Some(max_times);
-        self
-    }
-
-    pub(crate) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
-        self.max_punished_hosts_percent = Some(percent);
-        self
-    }
-
-    pub(crate) fn use_getfile_api(mut self, use_getfile_api: bool) -> Self {
-        self.use_getfile_api = use_getfile_api;
-        self
-    }
-
-    pub(crate) fn normalize_key(mut self, normalize_key: bool) -> Self {
-        self.normalize_key = normalize_key;
-        self
-    }
-
-    pub(crate) fn private_url_lifetime(mut self, private_url_lifetime: Option<Duration>) -> Self {
-        self.private_url_lifetime = private_url_lifetime;
-        self
-    }
-
-    pub(crate) fn dot_interval(mut self, dot_interval: Duration) -> Self {
-        self.dot_interval = Some(dot_interval);
-        self
-    }
-
-    pub(crate) fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
-        self.max_dot_buffer_size = Some(max_dot_buffer_size);
-        self
-    }
-
-    pub(crate) fn use_https(mut self, use_https: bool) -> Self {
-        self.use_https = use_https;
-        self
-    }
-
     pub(crate) fn build(self) -> AsyncRangeReader {
-        AsyncRangeReader(Arc::new(Lazy::new(Box::pin(async move {
+        AsyncRangeReader(Arc::new(AsyncLazy::new(Box::pin(async move {
             self.build_inner_and_key().await
         }))))
     }
 
     async fn build_inner_and_key(self) -> (Arc<AsyncRangeReaderInner>, String) {
-        let http_client = Timeouts::new(self.base_timeout, self.dial_timeout).async_http_client();
+        let builder = self.0;
+        let http_client =
+            Timeouts::new(builder.base_timeout, builder.dial_timeout).async_http_client();
         let dotter = Dotter::new(
             http_client.to_owned(),
-            self.credential.to_owned(),
-            self.bucket.to_owned(),
-            self.monitor_urls,
-            self.dot_interval,
-            self.max_dot_buffer_size,
-            self.dot_tries,
-            self.punish_duration,
-            self.max_punished_times,
-            self.max_punished_hosts_percent,
-            self.base_timeout,
+            builder.credential.to_owned(),
+            builder.bucket.to_owned(),
+            builder.monitor_urls,
+            builder.dot_interval,
+            builder.max_dot_buffer_size,
+            builder.dot_tries,
+            builder.punish_duration,
+            builder.max_punished_times,
+            builder.max_punished_hosts_percent,
+            builder.base_timeout,
         )
         .await;
 
         let params = HostSelectorParams {
-            update_interval: self.update_interval,
-            punish_duration: self.punish_duration,
-            max_punished_times: self.max_punished_times,
-            max_punished_hosts_percent: self.max_punished_hosts_percent,
-            base_timeout: self.base_timeout,
+            update_interval: builder.update_interval,
+            punish_duration: builder.punish_duration,
+            max_punished_times: builder.max_punished_times,
+            max_punished_hosts_percent: builder.max_punished_hosts_percent,
+            base_timeout: builder.base_timeout,
         };
 
-        let io_querier = if self.uc_urls.is_empty() {
+        let io_querier = if builder.uc_urls.is_empty() {
             None
         } else {
             Some(HostsQuerier::new(
-                make_uc_host_selector(self.uc_urls, &params).await,
-                self.uc_tries,
+                make_uc_host_selector(builder.uc_urls, &params).await,
+                builder.uc_tries,
                 dotter.to_owned(),
                 http_client.to_owned(),
             ))
         };
         let io_selector = make_io_selector(
-            self.io_urls,
+            builder.io_urls,
             io_querier,
-            self.credential.access_key().to_owned(),
-            self.bucket.to_owned(),
-            self.use_https,
+            builder.credential.access_key().to_owned(),
+            builder.bucket.to_owned(),
+            builder.use_https,
             &params,
         )
         .await;
@@ -284,14 +164,14 @@ impl AsyncRangeReaderBuilder {
                 io_selector,
                 dotter,
                 http_client,
-                credential: self.credential,
-                bucket: self.bucket,
-                use_getfile_api: self.use_getfile_api,
-                normalize_key: self.normalize_key,
-                use_https: self.use_https,
-                private_url_lifetime: self.private_url_lifetime,
+                credential: builder.credential,
+                bucket: builder.bucket,
+                use_getfile_api: builder.use_getfile_api,
+                normalize_key: builder.normalize_key,
+                use_https: builder.use_https,
+                private_url_lifetime: builder.private_url_lifetime,
             }),
-            self.key,
+            builder.key,
         );
 
         #[derive(Clone, Debug)]
@@ -368,18 +248,10 @@ impl AsyncRangeReaderBuilder {
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
         build_async_range_reader_builder_from_config(key, config)
     }
-
-    pub(crate) fn from_env_with_extra_items(
-        key: String,
-    ) -> Option<(Self, Option<usize>, Option<usize>)> {
-        build_async_range_reader_builder_from_env_with_extra_options(key, false)
-    }
 }
 
 #[derive(Clone)]
-pub(crate) struct AsyncRangeReader(Arc<Lazy<(Arc<AsyncRangeReaderInner>, String)>>);
-
-// TODO: 重新考虑下是否应该是 pub(crate)
+pub(crate) struct AsyncRangeReader(Arc<AsyncLazy<(Arc<AsyncRangeReaderInner>, String)>>);
 
 #[derive(Debug)]
 pub(crate) struct AsyncRangeReaderInner {
@@ -395,19 +267,6 @@ pub(crate) struct AsyncRangeReaderInner {
 }
 
 impl AsyncRangeReader {
-    pub(super) fn builder(
-        bucket: String,
-        key: String,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> AsyncRangeReaderBuilder {
-        AsyncRangeReaderBuilder::new(bucket, key, credential, io_urls)
-    }
-
-    pub(super) fn from_config(key: String, config: &Config) -> Self {
-        AsyncRangeReaderBuilder::from_config(key, config).build()
-    }
-
     pub(super) fn from_env_with_extra_items(
         key: String,
     ) -> Option<(Self, Option<usize>, Option<usize>)> {
@@ -441,7 +300,7 @@ impl AsyncRangeReader {
         })
         .map(|(max_retry_concurrency, total_tries, fut)| {
             (
-                Self(Arc::new(Lazy::new(fut))),
+                Self(Arc::new(AsyncLazy::new(fut))),
                 max_retry_concurrency,
                 total_tries,
             )
@@ -1441,18 +1300,21 @@ mod tests {
             {
                 let have_tried = AtomicUsize::new(0);
                 let io_urls = io_urls.to_owned();
-                let downloader = AsyncRangeReader::builder(
-                    "bucket".to_owned(),
-                    "file".to_owned(),
-                    get_credential(),
-                    io_urls,
+                let downloader = AsyncRangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1),
                 )
-                .use_getfile_api(false)
-                .normalize_key(true)
-                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-                .dot_interval(Duration::from_millis(0))
-                .max_dot_buffer_size(1)
                 .build();
+
                 match downloader
                     .read_at(
                         5,
@@ -1473,18 +1335,21 @@ mod tests {
             {
                 let have_tried = AtomicUsize::new(0);
                 let io_urls = io_urls.to_owned();
-                let downloader = AsyncRangeReader::builder(
-                    "bucket".to_owned(),
-                    "file2".to_owned(),
-                    get_credential(),
-                    io_urls,
+                let downloader = AsyncRangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file2".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1),
                 )
-                .use_getfile_api(false)
-                .normalize_key(true)
-                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-                .dot_interval(Duration::from_millis(0))
-                .max_dot_buffer_size(1)
                 .build();
+
                 match downloader
                     .read_at(
                         5,
@@ -1543,18 +1408,21 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true)
+                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                .dot_interval(Duration::from_millis(0))
+                .max_dot_buffer_size(1),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
-            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-            .dot_interval(Duration::from_millis(0))
-            .max_dot_buffer_size(1)
             .build();
+
             match downloader
                 .read_at(
                     1,
@@ -1611,18 +1479,21 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true)
+                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                .dot_interval(Duration::from_millis(0))
+                .max_dot_buffer_size(1),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
-            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-            .dot_interval(Duration::from_millis(0))
-            .max_dot_buffer_size(1)
             .build();
+
             match downloader
                 .read_at(
                     1,
@@ -1679,18 +1550,21 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let have_tried = AtomicUsize::new(0);
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true)
+                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                .dot_interval(Duration::from_millis(0))
+                .max_dot_buffer_size(1),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
-            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-            .dot_interval(Duration::from_millis(0))
-            .max_dot_buffer_size(1)
             .build();
+
             match downloader
                 .read_last_bytes(
                     10,
@@ -1738,17 +1612,19 @@ mod tests {
         let io_routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let io_urls = vec![format!("http://{}", io_addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true)
+                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                .dot_interval(Duration::from_millis(0))
+                .max_dot_buffer_size(1),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
-            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-            .dot_interval(Duration::from_millis(0))
-            .max_dot_buffer_size(1)
             .build();
 
             let have_tried = AtomicUsize::new(0);
@@ -1856,17 +1732,19 @@ mod tests {
 
         starts_with_server!(addr, monitor_addr, routes, records_map, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                .use_getfile_api(false)
+                .normalize_key(true)
+                .dot_interval(Duration::from_millis(0))
+                .max_dot_buffer_size(1),
             )
-            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-            .use_getfile_api(false)
-            .normalize_key(true)
-            .dot_interval(Duration::from_millis(0))
-            .max_dot_buffer_size(1)
             .build();
 
             let have_tried = AtomicUsize::new(0);
@@ -1973,14 +1851,16 @@ mod tests {
         };
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let have_tried = AtomicUsize::new(0);
@@ -2037,14 +1917,16 @@ mod tests {
         let routes = { path!("file").map(|| Response::new("1234567890".into())) };
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let have_tried = AtomicUsize::new(0);
@@ -2140,14 +2022,16 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let ranges = [(0, 5), (5, 5)];
@@ -2191,14 +2075,16 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let ranges = [(0, 5), (5, 5)];
@@ -2250,14 +2136,16 @@ mod tests {
             let c = counter.to_owned();
             spawn(async move {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = AsyncRangeReader::builder(
-                    "bucket".to_owned(),
-                    "file".to_owned(),
-                    get_credential(),
-                    io_urls,
+                let downloader = AsyncRangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true),
                 )
-                .use_getfile_api(false)
-                .normalize_key(true)
                 .build();
 
                 let ranges = [(0, 5), (5, 5)];
@@ -2282,13 +2170,15 @@ mod tests {
             let c = counter.to_owned();
             spawn(async move {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = AsyncRangeReader::builder(
-                    "bucket".to_owned(),
-                    "/file".to_owned(),
-                    get_credential(),
-                    io_urls,
+                let downloader = AsyncRangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "/file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false),
                 )
-                .use_getfile_api(false)
                 .build();
 
                 let ranges = [(0, 5), (5, 5)];
@@ -2356,14 +2246,16 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let ranges = [(0, 5), (5, 5)];
@@ -2408,14 +2300,16 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let ranges = [(0, 5), (5, 1)];
@@ -2462,14 +2356,16 @@ mod tests {
 
         starts_with_server!(addr, routes, {
             let io_urls = vec![format!("http://{}", addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls,
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls,
+                )
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             let ranges = [(0, 4)];
@@ -2505,15 +2401,17 @@ mod tests {
         starts_with_server!(io_addr, uc_addr, routes, {
             let io_urls = vec!["http://fakedomain:12345".to_owned()];
             let uc_urls = vec![format!("http://{}", uc_addr)];
-            let downloader = AsyncRangeReader::builder(
-                "bucket".to_owned(),
-                "file".to_owned(),
-                get_credential(),
-                io_urls.to_owned(),
+            let downloader = AsyncRangeReaderBuilder::from(
+                BaseRangeReaderBuilder::new(
+                    "bucket".to_owned(),
+                    "file".to_owned(),
+                    get_credential(),
+                    io_urls.to_owned(),
+                )
+                .uc_urls(uc_urls)
+                .use_getfile_api(false)
+                .normalize_key(true),
             )
-            .uc_urls(uc_urls)
-            .use_getfile_api(false)
-            .normalize_key(true)
             .build();
 
             assert_eq!(downloader.io_urls().await, io_urls);

@@ -11,7 +11,6 @@
     indirect_structural_match,
     trivial_casts,
     trivial_numeric_casts,
-    // unreachable_pub,
     unused_crate_dependencies,
     unused_extern_crates,
     unused_import_braces,
@@ -28,12 +27,14 @@
 mod async_api;
 mod base;
 mod config;
+mod download;
 mod sync_api;
 
 pub use async_api::{
     disable_dot_uploading, disable_dotting, enable_dot_uploading, enable_dotting,
     is_dot_uploading_disabled, is_dotting_disabled, set_download_start_time,
     sign_download_url_with_deadline, sign_download_url_with_lifetime, total_download_duration,
+    RangePart,
 };
 pub use base::credential::Credential;
 pub use config::{
@@ -43,3 +44,4 @@ pub use config::{
     MultipleClustersConfigBuilder, MultipleClustersConfigParseError, SingleClusterConfig,
     SingleClusterConfigBuilder,
 };
+pub use download::{RangeReader, RangeReaderBuilder};

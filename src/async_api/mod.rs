@@ -19,3 +19,4 @@ pub(crate) use download::{AsyncRangeReaderBuilder, AsyncRangeReaderInner};
 mod retrier;
 
 mod sync;
+pub(crate) use sync::{RangeReader, RangeReaderBuilder};

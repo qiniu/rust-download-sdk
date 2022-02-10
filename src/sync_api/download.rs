@@ -1,10 +1,9 @@
 use super::{
     super::{
         async_api::{sign_download_url_with_lifetime, RangePart},
-        base::credential::Credential,
+        base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
         config::{
-            build_range_reader_builder_from_config, build_range_reader_builder_from_env,
-            with_current_qiniu_config, Config, Timeouts,
+            build_range_reader_builder_from_config, with_current_qiniu_config, Config, Timeouts,
         },
     },
     dot::{ApiName, DotType, Dotter},
@@ -36,7 +35,6 @@ use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
 use url::Url;
 
-/// 对象范围下载器
 #[derive(Debug)]
 pub(crate) struct RangeReader {
     inner: Arc<RangeReaderInner>,
@@ -58,241 +56,67 @@ pub(crate) struct RangeReaderInner {
 }
 
 #[derive(Debug)]
-/// 对象范围下载构建器
-pub(crate) struct RangeReaderBuilder {
-    credential: Credential,
-    bucket: String,
-    key: String,
-    io_urls: Vec<String>,
-    uc_urls: Vec<String>,
-    monitor_urls: Vec<String>,
-    io_tries: usize,
-    uc_tries: usize,
-    update_interval: Option<Duration>,
-    punish_duration: Option<Duration>,
-    base_timeout: Option<Duration>,
-    dial_timeout: Option<Duration>,
-    max_punished_times: Option<usize>,
-    max_punished_hosts_percent: Option<u8>,
-    use_getfile_api: bool,
-    normalize_key: bool,
-    private_url_lifetime: Option<Duration>,
-    use_https: bool,
-    dot_tries: Option<usize>,
-    dot_interval: Option<Duration>,
-    max_dot_buffer_size: Option<u64>,
+pub(crate) struct RangeReaderBuilder(BaseRangeReaderBuilder);
+
+impl From<BaseRangeReaderBuilder> for RangeReaderBuilder {
+    fn from(builder: BaseRangeReaderBuilder) -> Self {
+        Self(builder)
+    }
+}
+
+impl From<RangeReaderBuilder> for BaseRangeReaderBuilder {
+    fn from(builder: RangeReaderBuilder) -> Self {
+        builder.0
+    }
 }
 
 impl RangeReaderBuilder {
-    /// 创建对象范围下载构建器
-    /// # Arguments
-    ///
-    /// * `bucket` - 存储空间
-    /// * `key` - 对象名称
-    /// * `credential` - 存储空间所在账户的凭证
-    /// * `io_urls` - 七牛 IO 服务器 URL 列表
-
-    pub(crate) fn new(
-        bucket: impl Into<String>,
-        key: impl Into<String>,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> Self {
-        Self {
-            bucket: bucket.into(),
-            key: key.into(),
-            credential,
-            io_urls,
-            uc_urls: vec![],
-            monitor_urls: vec![],
-            io_tries: 10,
-            uc_tries: 10,
-            update_interval: None,
-            punish_duration: None,
-            base_timeout: None,
-            dial_timeout: None,
-            max_punished_times: None,
-            max_punished_hosts_percent: None,
-            use_getfile_api: true,
-            normalize_key: false,
-            private_url_lifetime: None,
-            use_https: false,
-            dot_tries: None,
-            dot_interval: None,
-            max_dot_buffer_size: None,
-        }
-    }
-
-    /// 设置七牛 UC 服务器 URL 列表
-
-    pub(crate) fn uc_urls(mut self, urls: Vec<String>) -> Self {
-        self.uc_urls = urls;
-        self
-    }
-
-    /// 设置七牛监控服务器 URL 列表
-
-    pub(crate) fn monitor_urls(mut self, urls: Vec<String>) -> Self {
-        self.monitor_urls = urls;
-        self
-    }
-
-    /// 设置对象下载最大尝试次数
-
-    pub(crate) fn io_tries(mut self, tries: usize) -> Self {
-        self.io_tries = tries;
-        self
-    }
-
-    /// 设置 UC 查询的最大尝试次数
-
-    pub(crate) fn uc_tries(mut self, tries: usize) -> Self {
-        self.uc_tries = tries;
-        self
-    }
-
-    /// 设置打点记录上传的最大尝试次数
-
-    pub(crate) fn dot_tries(mut self, tries: usize) -> Self {
-        self.dot_tries = Some(tries);
-        self
-    }
-
-    /// 设置 UC 查询的频率
-
-    pub(crate) fn update_interval(mut self, interval: Duration) -> Self {
-        self.update_interval = Some(interval);
-        self
-    }
-
-    /// 设置域名访问失败后的惩罚时长
-
-    pub(crate) fn punish_duration(mut self, duration: Duration) -> Self {
-        self.punish_duration = Some(duration);
-        self
-    }
-
-    /// 设置域名访问的基础超时时长
-
-    pub(crate) fn base_timeout(mut self, timeout: Duration) -> Self {
-        self.base_timeout = Some(timeout);
-        self
-    }
-
-    /// 设置域名访问的连接时长
-
-    pub(crate) fn connect_timeout(mut self, timeout: Duration) -> Self {
-        self.dial_timeout = Some(timeout);
-        self
-    }
-
-    /// 设置失败域名的最大重试次数
-    ///
-    /// 一旦一个域名的被惩罚次数超过限制，则域名选择器不会选择该域名，除非被惩罚的域名比例超过上限，或惩罚时长超过指定时长
-
-    pub(crate) fn max_punished_times(mut self, max_times: usize) -> Self {
-        self.max_punished_times = Some(max_times);
-        self
-    }
-
-    /// 设置被惩罚的域名最大比例
-    ///
-    /// 域名选择器在搜索域名时，一旦被跳过的域名比例大于该值，则下一个域名将被选中，不管该域名是否也被惩罚。一旦该域名成功，则惩罚将立刻被取消
-
-    pub(crate) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
-        self.max_punished_hosts_percent = Some(percent);
-        self
-    }
-
-    /// 设置是否使用 getfile API 下载
-
-    pub(crate) fn use_getfile_api(mut self, use_getfile_api: bool) -> Self {
-        self.use_getfile_api = use_getfile_api;
-        self
-    }
-
-    /// 设置是否对 key 进行格式化
-
-    pub(crate) fn normalize_key(mut self, normalize_key: bool) -> Self {
-        self.normalize_key = normalize_key;
-        self
-    }
-
-    /// 设置私有空间下载 URL 有效期，如果为 None，则使用公开空间下载 URL
-
-    pub(crate) fn private_url_lifetime(mut self, private_url_lifetime: Option<Duration>) -> Self {
-        self.private_url_lifetime = private_url_lifetime;
-        self
-    }
-
-    /// 设置打点记录上传频率
-
-    pub(crate) fn dot_interval(mut self, dot_interval: Duration) -> Self {
-        self.dot_interval = Some(dot_interval);
-        self
-    }
-
-    /// 设置打点记录本地缓存文件尺寸上限
-
-    pub(crate) fn max_dot_buffer_size(mut self, max_dot_buffer_size: u64) -> Self {
-        self.max_dot_buffer_size = Some(max_dot_buffer_size);
-        self
-    }
-
-    /// 设置是否使用 HTTPS 协议来访问 IO 服务器
-
-    pub(crate) fn use_https(mut self, use_https: bool) -> Self {
-        self.use_https = use_https;
-        self
-    }
-
-    /// 构建范围下载器
-
     pub(crate) fn build(self) -> RangeReader {
         let (inner, key) = self.build_inner_and_key();
         RangeReader { inner, key }
     }
 
     fn build_inner_and_key(self) -> (Arc<RangeReaderInner>, String) {
-        let http_client = Timeouts::new(self.base_timeout, self.dial_timeout).http_client();
+        let builder = self.0;
+        let http_client = Timeouts::new(builder.base_timeout, builder.dial_timeout).http_client();
         let dotter = Dotter::new(
             http_client.to_owned(),
-            self.credential.to_owned(),
-            self.bucket.to_owned(),
-            self.monitor_urls,
-            self.dot_interval,
-            self.max_dot_buffer_size,
-            self.dot_tries,
-            self.punish_duration,
-            self.max_punished_times,
-            self.max_punished_hosts_percent,
-            self.base_timeout,
+            builder.credential.to_owned(),
+            builder.bucket.to_owned(),
+            builder.monitor_urls,
+            builder.dot_interval,
+            builder.max_dot_buffer_size,
+            builder.dot_tries,
+            builder.punish_duration,
+            builder.max_punished_times,
+            builder.max_punished_hosts_percent,
+            builder.base_timeout,
         );
 
         let params = HostSelectorParams {
-            update_interval: self.update_interval,
-            punish_duration: self.punish_duration,
-            max_punished_times: self.max_punished_times,
-            max_punished_hosts_percent: self.max_punished_hosts_percent,
-            base_timeout: self.base_timeout,
+            update_interval: builder.update_interval,
+            punish_duration: builder.punish_duration,
+            max_punished_times: builder.max_punished_times,
+            max_punished_hosts_percent: builder.max_punished_hosts_percent,
+            base_timeout: builder.base_timeout,
         };
 
-        let io_querier = if self.uc_urls.is_empty() {
+        let io_querier = if builder.uc_urls.is_empty() {
             None
         } else {
             Some(HostsQuerier::new(
-                make_uc_host_selector(self.uc_urls, &params),
-                self.uc_tries,
+                make_uc_host_selector(builder.uc_urls, &params),
+                builder.uc_tries,
                 dotter.to_owned(),
                 http_client.to_owned(),
             ))
         };
         let io_selector = make_io_selector(
-            self.io_urls,
+            builder.io_urls,
             io_querier,
-            self.credential.access_key().to_owned(),
-            self.bucket.to_owned(),
-            self.use_https,
+            builder.credential.access_key().to_owned(),
+            builder.bucket.to_owned(),
+            builder.use_https,
             &params,
         );
 
@@ -301,15 +125,15 @@ impl RangeReaderBuilder {
                 io_selector,
                 dotter,
                 http_client,
-                credential: self.credential,
-                bucket: self.bucket,
-                tries: self.io_tries,
-                use_getfile_api: self.use_getfile_api,
-                normalize_key: self.normalize_key,
-                use_https: self.use_https,
-                private_url_lifetime: self.private_url_lifetime,
+                credential: builder.credential,
+                bucket: builder.bucket,
+                tries: builder.io_tries,
+                use_getfile_api: builder.use_getfile_api,
+                normalize_key: builder.normalize_key,
+                use_https: builder.use_https,
+                private_url_lifetime: builder.private_url_lifetime,
             }),
-            self.key,
+            builder.key,
         );
 
         #[derive(Clone, Debug)]
@@ -372,55 +196,17 @@ impl RangeReaderBuilder {
         }
     }
 
-    /// 从配置创建范围下载构建器
-    /// # Arguments
-    ///
-    /// * `key` - 对象名称
-    /// * `config` - 下载配置
-
-    pub(crate) fn from_config(key: impl Into<String>, config: &Config) -> Self {
-        build_range_reader_builder_from_config(key.into(), config)
-    }
-
-    /// 从环境变量创建范围下载构建器
-    /// # Arguments
-    ///
-    /// * `key` - 对象名称
-
-    pub(crate) fn from_env(key: impl Into<String>) -> Option<Self> {
-        build_range_reader_builder_from_env(key.into(), false)
+    pub(crate) fn from_config(key: String, config: &Config) -> Self {
+        build_range_reader_builder_from_config(key, config)
     }
 }
 
 impl RangeReader {
-    /// 创建范围下载构建器
-
-    pub(crate) fn builder(
-        bucket: impl Into<String>,
-        key: impl Into<String>,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> RangeReaderBuilder {
-        RangeReaderBuilder::new(bucket, key, credential, io_urls)
-    }
-
-    /// 从配置创建范围下载器
-    /// # Arguments
-    ///
-    /// * `key` - 对象名称
-    /// * `config` - 下载配置
-
-    pub(crate) fn from_config(key: impl Into<String>, config: &Config) -> Self {
+    pub(crate) fn from_config(key: String, config: &Config) -> Self {
         RangeReaderBuilder::from_config(key, config).build()
     }
 
-    /// 从环境变量创建范围下载器
-    /// # Arguments
-    ///
-    /// * `key` - 对象名称
-
-    pub(crate) fn from_env(key: impl Into<String>) -> Option<Self> {
-        let key = key.into();
+    pub(crate) fn from_env(key: String) -> Option<Self> {
         with_current_qiniu_config(|config| {
             config.and_then(|config| {
                 config.with_key(&key.to_owned(), |config| {
@@ -435,14 +221,10 @@ impl RangeReader {
         .map(|inner| Self { inner, key })
     }
 
-    /// 主动更新域名列表
-    ///
-    /// 如果返回为 true 表示更新成功，否则返回 false
     pub(crate) fn update_urls(&self) -> bool {
         self.inner.io_selector.update_hosts()
     }
 
-    /// 获取当前可用的 IO 节点的域名
     pub(crate) fn io_urls(&self) -> Vec<String> {
         return self
             .inner
@@ -534,9 +316,6 @@ impl ReadAt for RangeReader {
 }
 
 impl RangeReader {
-    /// 读取文件的多个区域，返回每个区域对应的数据
-    /// # Arguments
-    /// * `range` - 区域列表，每个区域有开始偏移量和区域长度组成
     pub(crate) fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IOResult<Vec<RangePart>> {
         let range_header_value = format!("bytes={}", generate_range_header(ranges));
         let begin_at = Instant::now();
@@ -722,7 +501,6 @@ impl RangeReader {
         }
     }
 
-    /// 判定当前对象是否存在
     pub(crate) fn exist(&self) -> IOResult<bool> {
         let begin_at = Instant::now();
         self.with_retries(
@@ -775,7 +553,6 @@ impl RangeReader {
         )
     }
 
-    /// 获取当前对象的文件大小
     pub(crate) fn file_size(&self) -> IOResult<u64> {
         let begin_at = Instant::now();
         self.with_retries(
@@ -830,14 +607,12 @@ impl RangeReader {
         )
     }
 
-    /// 下载当前对象到内存缓冲区中
     pub(crate) fn download(&self) -> IOResult<Vec<u8>> {
         let mut bytes = Cursor::new(Vec::new());
         self.download_to(&mut bytes)?;
         Ok(bytes.into_inner())
     }
 
-    /// 下载当前对象到指定输出流中
     pub(crate) fn download_to(&self, writer: &mut dyn WriteSeek) -> IOResult<u64> {
         let init_start_from = writer.seek(SeekFrom::End(0))?;
         let mut start_from = init_start_from;
@@ -1136,7 +911,7 @@ impl RangeReader {
     }
 }
 
-pub(crate) trait WriteSeek: Write + Seek {}
+pub trait WriteSeek: Write + Seek {}
 impl<T: Write + Seek> WriteSeek for T {}
 
 #[cold]
@@ -1319,14 +1094,20 @@ mod tests {
             {
                 let io_urls = io_urls.to_owned();
                 spawn_blocking(move || {
-                    let downloader =
-                        RangeReader::builder("bucket", "file", get_credential(), io_urls)
-                            .use_getfile_api(false)
-                            .normalize_key(true)
-                            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-                            .dot_interval(Duration::from_millis(0))
-                            .max_dot_buffer_size(1)
-                            .build();
+                    let downloader = RangeReaderBuilder::from(
+                        BaseRangeReaderBuilder::new(
+                            "bucket".to_owned(),
+                            "file".to_owned(),
+                            get_credential(),
+                            io_urls,
+                        )
+                        .use_getfile_api(false)
+                        .normalize_key(true)
+                        .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                        .dot_interval(Duration::from_millis(0))
+                        .max_dot_buffer_size(1),
+                    )
+                    .build();
                     let mut buf = [0u8; 6];
                     assert_eq!(downloader.read_at(5, &mut buf).unwrap(), 6);
                     assert_eq!(&buf, b"123456");
@@ -1336,14 +1117,20 @@ mod tests {
             {
                 let io_urls = io_urls.to_owned();
                 spawn_blocking(move || {
-                    let downloader =
-                        RangeReader::builder("bucket", "file2", get_credential(), io_urls)
-                            .use_getfile_api(false)
-                            .normalize_key(true)
-                            .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
-                            .dot_interval(Duration::from_millis(0))
-                            .max_dot_buffer_size(1)
-                            .build();
+                    let downloader = RangeReaderBuilder::from(
+                        BaseRangeReaderBuilder::new(
+                            "bucket".to_owned(),
+                            "file2".to_owned(),
+                            get_credential(),
+                            io_urls,
+                        )
+                        .use_getfile_api(false)
+                        .normalize_key(true)
+                        .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                        .dot_interval(Duration::from_millis(0))
+                        .max_dot_buffer_size(1),
+                    )
+                    .build();
                     let mut buf = [0u8; 12];
                     assert_eq!(downloader.read_at(5, &mut buf).unwrap(), 10);
                     assert_eq!(&buf[..10], b"1234567890");
@@ -1391,14 +1178,21 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", io_addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .io_tries(3)
                     .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .dot_interval(Duration::from_millis(0))
-                    .max_dot_buffer_size(1)
-                    .build();
+                    .max_dot_buffer_size(1),
+                )
+                .build();
                 let mut buf = [0u8; 5];
                 downloader.read_at(1, &mut buf).unwrap_err();
                 assert_eq!(io_called.load(Relaxed), 3);
@@ -1445,13 +1239,20 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", io_addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .dot_interval(Duration::from_millis(0))
-                    .max_dot_buffer_size(1)
-                    .build();
+                    .max_dot_buffer_size(1),
+                )
+                .build();
                 let mut buf = [0u8; 5];
                 downloader.read_at(1, &mut buf).unwrap_err();
                 assert_eq!(io_called.load(Relaxed), 1);
@@ -1498,13 +1299,20 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", io_addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .dot_interval(Duration::from_millis(0))
-                    .max_dot_buffer_size(1)
-                    .build();
+                    .max_dot_buffer_size(1),
+                )
+                .build();
                 let mut buf = [0u8; 10];
                 assert_eq!(
                     downloader.read_last_bytes(&mut buf).unwrap(),
@@ -1545,13 +1353,20 @@ mod tests {
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", io_addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .dot_interval(Duration::from_millis(0))
-                    .max_dot_buffer_size(1)
-                    .build();
+                    .max_dot_buffer_size(1),
+                )
+                .build();
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
                 assert_eq!(&downloader.download().unwrap(), b"1234567890");
@@ -1615,14 +1430,21 @@ mod tests {
         starts_with_server!(addr, monitor_addr, routes, records_map, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .io_tries(3)
                     .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
                     .use_getfile_api(false)
                     .normalize_key(true)
                     .dot_interval(Duration::from_millis(0))
-                    .max_dot_buffer_size(1)
-                    .build();
+                    .max_dot_buffer_size(1),
+                )
+                .build();
                 downloader.exist().unwrap_err();
                 downloader.file_size().unwrap_err();
                 downloader.download().unwrap_err();
@@ -1690,10 +1512,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 downloader.exist().unwrap_err();
                 downloader.file_size().unwrap_err();
                 downloader.download().unwrap_err();
@@ -1713,10 +1542,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 assert!(downloader.exist().unwrap());
                 assert_eq!(downloader.file_size().unwrap(), 10);
                 let mut buf = Vec::new();
@@ -1773,10 +1609,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 5)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 2);
@@ -1806,10 +1649,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 5)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 2);
@@ -1845,11 +1695,18 @@ mod tests {
             let c = counter.to_owned();
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .io_tries(3)
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 5)];
                 downloader.read_multi_ranges(&ranges).unwrap_err();
                 assert_eq!(c.load(Relaxed), 3);
@@ -1859,10 +1716,17 @@ mod tests {
             let c = counter.to_owned();
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "/file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "/file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .io_tries(3)
-                    .use_getfile_api(false)
-                    .build();
+                    .use_getfile_api(false),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 5)];
                 downloader.read_multi_ranges(&ranges).unwrap_err();
                 assert_eq!(c.load(Relaxed), 6);
@@ -1914,10 +1778,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 5)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 2);
@@ -1947,10 +1818,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 5), (5, 1)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 1);
@@ -1981,10 +1859,17 @@ mod tests {
         starts_with_server!(addr, routes, {
             spawn_blocking(move || {
                 let io_urls = vec![format!("http://{}", addr)];
-                let downloader = RangeReader::builder("bucket", "file", get_credential(), io_urls)
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
                     .use_getfile_api(false)
-                    .normalize_key(true)
-                    .build();
+                    .normalize_key(true),
+                )
+                .build();
                 let ranges = [(0, 4)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 1);
@@ -2006,12 +1891,18 @@ mod tests {
             spawn_blocking(move || {
                 let io_urls = vec!["http://fakedomain:12345".to_owned()];
                 let uc_urls = vec![format!("http://{}", uc_addr)];
-                let downloader =
-                    RangeReader::builder("bucket", "file", get_credential(), io_urls.to_owned())
-                        .uc_urls(uc_urls)
-                        .use_getfile_api(false)
-                        .normalize_key(true)
-                        .build();
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls.to_owned(),
+                    )
+                    .uc_urls(uc_urls)
+                    .use_getfile_api(false)
+                    .normalize_key(true),
+                )
+                .build();
                 assert_eq!(downloader.io_urls(), io_urls);
                 assert!(downloader.update_urls());
                 assert_eq!(downloader.io_urls(), vec![format!("http://{}", io_addr)]);

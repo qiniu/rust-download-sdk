@@ -295,7 +295,7 @@ impl Config {
         self.max_retry_concurrency
     }
 
-    /// 设置最大并行重试次数
+    /// 设置最大并行重试次数，如果设置为 Some(0) 则表示禁止并行重试功能
     #[inline]
     pub fn set_max_retry_concurrency(&mut self, max_retry_concurrency: Option<usize>) -> &mut Self {
         self.max_retry_concurrency = max_retry_concurrency;
@@ -475,7 +475,7 @@ impl ConfigBuilder {
         self
     }
 
-    /// 配置最大并行重试次数，默认为 5
+    /// 配置最大并行重试次数，默认为 5，如果设置为 Some(0) 则表示禁止并行重试功能
     #[inline]
     pub fn max_retry_concurrency(mut self, max_retry_concurrency: Option<usize>) -> Self {
         self.0.max_retry_concurrency = max_retry_concurrency;

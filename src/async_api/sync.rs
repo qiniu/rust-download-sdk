@@ -1,5 +1,7 @@
 use super::{
-    super::{Config, Credential},
+    super::{
+        base::download::RangeReaderBuilder as BaseRangeReaderBuilder, sync_api::WriteSeek, Config,
+    },
     download::{AsyncRangeReader, AsyncRangeReaderBuilder},
     retrier::AsyncRangeReaderWithRangeReader,
     RangePart,
@@ -12,12 +14,11 @@ use log::{debug, error, trace};
 use positioned_io::ReadAt;
 use std::{
     future::Future,
-    io::{Error as IoError, Result as IoResult, Write},
+    io::{Error as IoError, Result as IoResult},
     sync::Arc,
     task::{Context, Poll},
     thread::{current as current_thread, park as park_thread},
     thread::{Builder as ThreadBuilder, JoinHandle, Thread},
-    time::Duration,
 };
 use tokio::{
     macros::support::poll_fn,
@@ -30,128 +31,39 @@ use tokio::{
 };
 
 #[derive(Debug)]
-pub(crate) struct RangeReaderBuilder {
-    inner: AsyncRangeReaderBuilder,
-    max_retry_concurrency: usize,
-    total_tries: usize,
+pub(crate) struct RangeReaderBuilder(AsyncRangeReaderBuilder);
+
+impl From<AsyncRangeReaderBuilder> for RangeReaderBuilder {
+    fn from(builder: AsyncRangeReaderBuilder) -> Self {
+        Self(builder)
+    }
+}
+
+impl From<RangeReaderBuilder> for AsyncRangeReaderBuilder {
+    fn from(builder: RangeReaderBuilder) -> Self {
+        builder.0
+    }
+}
+
+impl From<BaseRangeReaderBuilder> for RangeReaderBuilder {
+    fn from(builder: BaseRangeReaderBuilder) -> Self {
+        Self(AsyncRangeReaderBuilder::from(builder))
+    }
+}
+
+impl From<RangeReaderBuilder> for BaseRangeReaderBuilder {
+    fn from(builder: RangeReaderBuilder) -> Self {
+        builder.0.into()
+    }
 }
 
 impl RangeReaderBuilder {
-    pub(crate) fn new(
-        bucket: String,
-        key: String,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> Self {
-        Self {
-            inner: AsyncRangeReaderBuilder::new(bucket, key, credential, io_urls),
-            max_retry_concurrency: 5,
-            total_tries: 10,
-        }
-    }
-
-    pub(crate) fn uc_urls(self, urls: Vec<String>) -> Self {
-        self.with_inner(|builder| builder.uc_urls(urls))
-    }
-
-    pub(crate) fn monitor_urls(self, urls: Vec<String>) -> Self {
-        self.with_inner(|builder| builder.monitor_urls(urls))
-    }
-
-    pub(crate) fn uc_tries(self, tries: usize) -> Self {
-        self.with_inner(|builder| builder.uc_tries(tries))
-    }
-
-    pub(crate) fn dot_tries(self, tries: usize) -> Self {
-        self.with_inner(|builder| builder.dot_tries(tries))
-    }
-
-    pub(crate) fn update_interval(self, interval: Duration) -> Self {
-        self.with_inner(|builder| builder.update_interval(interval))
-    }
-
-    pub(crate) fn punish_duration(self, interval: Duration) -> Self {
-        self.with_inner(|builder| builder.punish_duration(interval))
-    }
-
-    pub(crate) fn base_timeout(self, timeout: Duration) -> Self {
-        self.with_inner(|builder| builder.base_timeout(timeout))
-    }
-
-    pub(crate) fn connect_timeout(self, timeout: Duration) -> Self {
-        self.with_inner(|builder| builder.connect_timeout(timeout))
-    }
-
-    pub(crate) fn max_punished_times(self, max_times: usize) -> Self {
-        self.with_inner(|builder| builder.max_punished_times(max_times))
-    }
-
-    pub(crate) fn max_punished_hosts_percent(self, percent: u8) -> Self {
-        self.with_inner(|builder| builder.max_punished_hosts_percent(percent))
-    }
-
-    pub(crate) fn use_getfile_api(self, use_getfile_api: bool) -> Self {
-        self.with_inner(|builder| builder.use_getfile_api(use_getfile_api))
-    }
-
-    pub(crate) fn normalize_key(self, normalize_key: bool) -> Self {
-        self.with_inner(|builder| builder.normalize_key(normalize_key))
-    }
-
-    pub(crate) fn private_url_lifetime(self, private_url_lifetime: Option<Duration>) -> Self {
-        self.with_inner(|builder| builder.private_url_lifetime(private_url_lifetime))
-    }
-
-    pub(crate) fn dot_interval(self, dot_interval: Duration) -> Self {
-        self.with_inner(|builder| builder.dot_interval(dot_interval))
-    }
-
-    pub(crate) fn max_dot_buffer_size(self, max_dot_buffer_size: u64) -> Self {
-        self.with_inner(|builder| builder.max_dot_buffer_size(max_dot_buffer_size))
-    }
-
-    pub(crate) fn use_https(self, use_https: bool) -> Self {
-        self.with_inner(|builder| builder.use_https(use_https))
-    }
-
-    pub(crate) fn io_tries(mut self, tries: usize) -> Self {
-        self.total_tries = tries;
-        self
-    }
-
-    pub(crate) fn max_retry_concurrency(mut self, concurrency: usize) -> Self {
-        self.max_retry_concurrency = concurrency;
-        self
-    }
-
     pub(crate) fn build(self) -> RangeReader {
         RangeReader(RangeReaderHandle::new(self))
     }
 
-    fn with_inner(
-        mut self,
-        func: impl FnOnce(AsyncRangeReaderBuilder) -> AsyncRangeReaderBuilder,
-    ) -> Self {
-        self.inner = func(self.inner);
-        self
-    }
-
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
-        Self {
-            inner: AsyncRangeReaderBuilder::from_config(key, config),
-            max_retry_concurrency: config.max_retry_concurrency().unwrap_or(5),
-            total_tries: config.retry().unwrap_or(10),
-        }
-    }
-
-    pub(crate) fn from_env(key: String) -> Option<Self> {
-        AsyncRangeReaderBuilder::from_env_with_extra_items(key).map(
-            |(builder, max_retry_concurrency, total_tries)| Self {
-                inner: builder,
-                max_retry_concurrency: max_retry_concurrency.unwrap_or(5),
-                total_tries: total_tries.unwrap_or(10),
-            },
-        )
+        Self(AsyncRangeReaderBuilder::from_config(key, config))
     }
 }
 
@@ -161,10 +73,14 @@ trait BuildAsyncRangeReader: Send {
 
 impl BuildAsyncRangeReader for RangeReaderBuilder {
     fn build_async_range_reader(self) -> AsyncRangeReaderWithRangeReader {
+        let base = BaseRangeReaderBuilder::from(self);
+        let max_retry_concurrency = base.max_retry_concurrency;
+        let io_tries = base.io_tries;
+        let builder = AsyncRangeReaderBuilder::from(base);
         AsyncRangeReaderWithRangeReader::new(
-            self.inner.build(),
-            self.max_retry_concurrency,
-            self.total_tries,
+            builder.build(),
+            max_retry_concurrency.unwrap_or(5),
+            io_tries,
         )
     }
 }
@@ -299,15 +215,6 @@ impl RangeReaderHandle {
 }
 
 impl RangeReader {
-    pub(crate) fn builder(
-        bucket: String,
-        key: String,
-        credential: Credential,
-        io_urls: Vec<String>,
-    ) -> RangeReaderBuilder {
-        RangeReaderBuilder::new(bucket, key, credential, io_urls)
-    }
-
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
         RangeReaderBuilder::from_config(key, config).build()
     }
@@ -359,7 +266,7 @@ impl RangeReader {
     }
 
     pub(crate) fn file_size(&self) -> IoResult<u64> {
-        match self.execute(Request::Exist) {
+        match self.execute(Request::FileSize) {
             Ok(ResponseData::U64(size)) => Ok(size),
             Err(err) => Err(err),
             response => unexpected_response(response),
@@ -374,7 +281,7 @@ impl RangeReader {
         }
     }
 
-    pub(crate) fn download_to(&self, writer: &mut dyn Write) -> IoResult<u64> {
+    pub(crate) fn download_to(&self, writer: &mut dyn WriteSeek) -> IoResult<u64> {
         let bytes = self.download()?;
         writer.write_all(&bytes)?;
         Ok(bytes.len() as u64)
@@ -523,9 +430,9 @@ fn unexpected_response(response: Response) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{super::super::Credential, *};
     use hyper::header::{HeaderValue, RANGE};
-    use std::thread::spawn as spawn_thread;
+    use std::{thread::spawn as spawn_thread, time::Duration};
     use text_io::scan as scan_text;
     use tokio::task::{spawn, spawn_blocking};
     use warp::{header, path, reply::Response, Filter};
@@ -568,15 +475,17 @@ mod tests {
                 let io_urls = vec![format!("http://{}", io_addr)];
 
                 for (size, base_timeout_ms) in [(1024, 100), (1024 * 1024, 1000)] {
-                    let downloader = RangeReaderBuilder::new(
-                        "bucket".to_owned(),
-                        format!("file/{}", size),
-                        get_credential(),
-                        io_urls.to_owned(),
+                    let downloader = RangeReaderBuilder::from(
+                        BaseRangeReaderBuilder::new(
+                            "bucket".to_owned(),
+                            format!("file/{}", size),
+                            get_credential(),
+                            io_urls.to_owned(),
+                        )
+                        .use_getfile_api(false)
+                        .normalize_key(true)
+                        .base_timeout(Duration::from_millis(base_timeout_ms)),
                     )
-                    .use_getfile_api(false)
-                    .normalize_key(true)
-                    .base_timeout(Duration::from_millis(base_timeout_ms))
                     .build();
 
                     let threads = (0..=255u64)

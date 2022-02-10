@@ -14,7 +14,9 @@ pub use multi_clusters::{
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
 use super::{
-    async_api::AsyncRangeReaderBuilder, base::credential::Credential, sync_api::RangeReaderBuilder,
+    async_api::AsyncRangeReaderBuilder,
+    base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
+    sync_api::RangeReaderBuilder,
 };
 use log::{error, info, warn};
 use static_vars::qiniu_config;
@@ -166,11 +168,11 @@ pub enum ClustersConfigParseError {
     TOMLError(#[from] toml::de::Error),
 }
 
-pub(super) fn build_range_reader_builder_from_config(
+pub(super) fn build_base_range_reader_builder_from_config(
     key: String,
     config: &Config,
-) -> RangeReaderBuilder {
-    let mut builder = RangeReaderBuilder::new(
+) -> BaseRangeReaderBuilder {
+    let mut builder = BaseRangeReaderBuilder::new(
         config.bucket().to_owned(),
         key,
         Credential::new(config.access_key(), config.secret_key()),
@@ -222,6 +224,10 @@ pub(super) fn build_range_reader_builder_from_config(
         }
     }
 
+    if let Some(max_retry_concurrency) = config.max_retry_concurrency() {
+        builder = builder.max_retry_concurrency(max_retry_concurrency);
+    }
+
     if let Some(true) = config.private() {
         builder = builder.private_url_lifetime(Some(Duration::from_secs(3600)));
     }
@@ -237,17 +243,24 @@ pub(super) fn build_range_reader_builder_from_config(
     builder
 }
 
-pub(super) fn build_range_reader_builder_from_env(
+pub(super) fn build_range_reader_builder_from_config(
+    key: String,
+    config: &Config,
+) -> RangeReaderBuilder {
+    build_base_range_reader_builder_from_config(key, config).into()
+}
+
+pub(super) fn build_base_range_reader_builder_from_env(
     key: String,
     only_single_cluster: bool,
-) -> Option<RangeReaderBuilder> {
+) -> Option<BaseRangeReaderBuilder> {
     with_current_qiniu_config(|config| {
         config.and_then(|config| {
             if only_single_cluster && config.as_single().is_some() {
                 return None;
             }
             config.with_key(&key.to_owned(), move |config| {
-                build_range_reader_builder_from_config(key, config)
+                build_base_range_reader_builder_from_config(key, config)
             })
         })
     })
@@ -257,91 +270,7 @@ pub(super) fn build_async_range_reader_builder_from_config(
     key: String,
     config: &Config,
 ) -> AsyncRangeReaderBuilder {
-    let mut builder = AsyncRangeReaderBuilder::new(
-        config.bucket().to_owned(),
-        key,
-        Credential::new(config.access_key(), config.secret_key()),
-        config
-            .io_urls()
-            .map(|urls| urls.to_owned())
-            .unwrap_or_default(),
-    );
-
-    if let Some(uc_urls) = config.uc_urls() {
-        if !uc_urls.is_empty() {
-            builder = builder.uc_urls(uc_urls.to_owned());
-        }
-    }
-
-    if let Some(monitor_urls) = config.monitor_urls() {
-        if !monitor_urls.is_empty() {
-            builder = builder.monitor_urls(monitor_urls.to_owned());
-        }
-    }
-
-    if let Some(retry) = config.retry() {
-        if retry > 0 {
-            builder = builder.uc_tries(retry).dot_tries(retry);
-        }
-    }
-
-    if let Some(punish_time) = config.punish_time() {
-        if punish_time > Duration::from_secs(0) {
-            builder = builder.punish_duration(punish_time);
-        }
-    }
-
-    if let Some(base_timeout) = config.base_timeout() {
-        if base_timeout > Duration::from_millis(0) {
-            builder = builder.base_timeout(base_timeout);
-        }
-    }
-
-    if let Some(dot_interval) = config.dot_interval() {
-        if dot_interval > Duration::from_secs(0) {
-            builder = builder.dot_interval(dot_interval);
-        }
-    }
-
-    if let Some(max_dot_buffer_size) = config.max_dot_buffer_size() {
-        if max_dot_buffer_size > 0 {
-            builder = builder.max_dot_buffer_size(max_dot_buffer_size);
-        }
-    }
-
-    if let Some(true) = config.private() {
-        builder = builder.private_url_lifetime(Some(Duration::from_secs(3600)));
-    }
-
-    if let Some(use_getfile_api) = config.use_getfile_api() {
-        builder = builder.use_getfile_api(use_getfile_api);
-    }
-
-    if let Some(normalize_key) = config.normalize_key() {
-        builder = builder.normalize_key(normalize_key);
-    }
-
-    builder
-}
-
-pub(super) fn build_async_range_reader_builder_from_env_with_extra_options(
-    key: String,
-    only_single_cluster: bool,
-) -> Option<(AsyncRangeReaderBuilder, Option<usize>, Option<usize>)> {
-    with_current_qiniu_config(|config| {
-        config.and_then(|config| {
-            if only_single_cluster && config.as_single().is_some() {
-                return None;
-            }
-            config.with_key(&key.to_owned(), move |config| {
-                (
-                    build_async_range_reader_builder_from_config(key, config),
-                    config.max_retry_concurrency(),
-                    config.retry(),
-                )
-            })
-        })
-    })
+    build_base_range_reader_builder_from_config(key, config).into()
 }
 
 #[cfg(test)]
@@ -1041,14 +970,18 @@ mod tests {
         let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
 
         assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            RangeReader::from_env("/node1/file1".to_owned())
+                .unwrap()
+                .io_urls(),
             vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
         );
         assert_eq!(
-            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
+            RangeReader::from_env("/node2/file1".to_owned())
+                .unwrap()
+                .io_urls(),
             vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
         );
-        assert!(RangeReader::from_env("/node3/file1").is_none());
+        assert!(RangeReader::from_env("/node3/file1".to_owned()).is_none());
 
         {
             let config = ConfigBuilder::new(
@@ -1064,14 +997,18 @@ mod tests {
         sleep(Duration::from_secs(1));
 
         assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            RangeReader::from_env("/node1/file1".to_owned())
+                .unwrap()
+                .io_urls(),
             vec![
                 "http://io-112.com".to_owned(),
                 "http://io-122.com".to_owned()
             ]
         );
         assert_eq!(
-            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
+            RangeReader::from_env("/node2/file1".to_owned())
+                .unwrap()
+                .io_urls(),
             vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
         );
 
@@ -1084,13 +1021,15 @@ mod tests {
         sleep(Duration::from_secs(1));
 
         assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
+            RangeReader::from_env("/node1/file1".to_owned())
+                .unwrap()
+                .io_urls(),
             vec![
                 "http://io-112.com".to_owned(),
                 "http://io-122.com".to_owned()
             ]
         );
-        assert!(RangeReader::from_env("/node2/file1").is_none());
+        assert!(RangeReader::from_env("/node2/file1".to_owned()).is_none());
 
         Ok(())
     }
