@@ -1,4 +1,4 @@
-use atomic_once_cell::AtomicLazy;
+use once_cell::sync::Lazy;
 use directories::BaseDirs;
 use log::warn;
 use std::{
@@ -14,7 +14,7 @@ pub(super) fn cache_dir_path_of(path: impl AsRef<Path>) -> IoResult<PathBuf> {
         .tap_err(|err| warn!("Failed to get cache directory: {}", err));
 
     fn _cache_dir_path_of(path: &Path) -> IoResult<PathBuf> {
-        static CACHE_DIR: AtomicLazy<PathBuf> = AtomicLazy::new(|| {
+        static CACHE_DIR: Lazy<PathBuf> = Lazy::new(|| {
             BaseDirs::new()
                 .map(|dir| dir.cache_dir().join("qiniu-download"))
                 .unwrap_or_else(|| temp_dir().join("qiniu-download"))

@@ -3,9 +3,9 @@ use super::{
     dot::{ApiName, DotType, Dotter},
     host_selector::{HostInfo, HostSelector},
 };
-use atomic_once_cell::AtomicLazy;
 use futures::TryFutureExt;
 use log::{info, warn};
+use once_cell::sync::Lazy;
 use reqwest::{Client as HttpClient, StatusCode};
 use serde::{
     de::{Error as DeError, Visitor},
@@ -394,7 +394,7 @@ async fn query_for_domains_without_cache(
     }
 }
 
-static CACHE_FILE_LOCK: AtomicLazy<Mutex<()>> = AtomicLazy::new(Default::default);
+static CACHE_FILE_LOCK: Lazy<Mutex<()>> = Lazy::new(Default::default);
 
 pub(super) const CACHE_FILE_NAME: &str = "query-cache.json";
 pub(super) const CACHE_TEMPFILE_NAME: &str = "query-cache.tmp.json";
