@@ -5,7 +5,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        toolchain: ['stable', '1.51.0', 'nightly-2021-04-24']
+        toolchain: ['stable', '1.54.0', 'nightly-2021-07-29']
     steps:
       - name: Checkout repo
         uses: actions/checkout@v2
