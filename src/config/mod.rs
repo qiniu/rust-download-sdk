@@ -275,7 +275,7 @@ pub(super) fn build_async_range_reader_builder_from_config(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::sync_api::RangeReader, static_vars::reset_static_vars, *};
+    use super::{super::RangeReader, static_vars::reset_static_vars, *};
     use anyhow::Result;
     use std::{
         collections::HashMap,
@@ -930,6 +930,7 @@ mod tests {
                 "test-bucket-1",
                 Some(vec!["http://io-11.com".into(), "http://io-12.com".into()]),
             )
+            .max_retry_concurrency(Some(1))
             .build();
             let mut tempfile = TempFileBuilder::new()
                 .prefix("1-")
@@ -946,6 +947,7 @@ mod tests {
                 "test-bucket-2",
                 Some(vec!["http://io-21.com".into(), "http://io-22.com".into()]),
             )
+            .max_retry_concurrency(Some(0))
             .build();
             let mut tempfile = TempFileBuilder::new()
                 .prefix("2-")
@@ -969,18 +971,22 @@ mod tests {
         };
         let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1".to_owned())
-                .unwrap()
-                .io_urls(),
-            vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
-        );
-        assert_eq!(
-            RangeReader::from_env("/node2/file1".to_owned())
-                .unwrap()
-                .io_urls(),
-            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
-        );
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
+            );
+            assert!(downloader.is_async());
+        }
+        {
+            let downloader = RangeReader::from_env("/node2/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+            );
+            assert!(!downloader.is_async());
+        }
         assert!(RangeReader::from_env("/node3/file1".to_owned()).is_none());
 
         {
@@ -990,27 +996,32 @@ mod tests {
                 "test-bucket-1",
                 Some(vec!["http://io-112.com".into(), "http://io-122.com".into()]),
             )
+            .max_retry_concurrency(Some(0))
             .build();
             fs::write(&tempfile_path_1, &toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1".to_owned())
-                .unwrap()
-                .io_urls(),
-            vec![
-                "http://io-112.com".to_owned(),
-                "http://io-122.com".to_owned()
-            ]
-        );
-        assert_eq!(
-            RangeReader::from_env("/node2/file1".to_owned())
-                .unwrap()
-                .io_urls(),
-            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
-        );
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec![
+                    "http://io-112.com".to_owned(),
+                    "http://io-122.com".to_owned()
+                ]
+            );
+            assert!(!downloader.is_async());
+        }
+        {
+            let downloader = RangeReader::from_env("/node2/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+            );
+            assert!(!downloader.is_async());
+        }
 
         {
             let mut config = HashMap::with_capacity(2);
@@ -1020,15 +1031,17 @@ mod tests {
 
         sleep(Duration::from_secs(1));
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1".to_owned())
-                .unwrap()
-                .io_urls(),
-            vec![
-                "http://io-112.com".to_owned(),
-                "http://io-122.com".to_owned()
-            ]
-        );
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec![
+                    "http://io-112.com".to_owned(),
+                    "http://io-122.com".to_owned()
+                ]
+            );
+            assert!(!downloader.is_async());
+        }
         assert!(RangeReader::from_env("/node2/file1".to_owned()).is_none());
 
         Ok(())

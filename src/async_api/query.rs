@@ -722,6 +722,7 @@ mod tests {
                 dotter,
                 Timeouts::default_async_http_client(),
             );
+
             let mut io_urls = hosts_querier
                 .query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)
                 .await?;
@@ -734,7 +735,7 @@ mod tests {
             assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
             assert_eq!(uc_called.load(Relaxed), 1);
 
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_secs(3)).await;
 
             io_urls = hosts_querier
                 .query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)
@@ -742,7 +743,7 @@ mod tests {
             assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
             assert_eq!(uc_called.load(Relaxed), 1);
 
-            sleep(Duration::from_secs(1)).await;
+            sleep(Duration::from_secs(3)).await;
             assert_eq!(uc_called.load(Relaxed), 2);
 
             let _ = cache_map(true).await?;
@@ -758,7 +759,7 @@ mod tests {
                 let record = records_map
                     .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
                     .unwrap();
-                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.success_count(), Some(3));
                 assert_eq!(record.failed_count(), Some(0));
             }
 

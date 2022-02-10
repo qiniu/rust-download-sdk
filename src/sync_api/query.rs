@@ -680,13 +680,13 @@ mod tests {
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(uc_called.load(Relaxed), 1);
 
-                sleep(Duration::from_secs(1));
+                sleep(Duration::from_secs(3));
 
                 io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(uc_called.load(Relaxed), 1);
 
-                sleep(Duration::from_secs(1));
+                sleep(Duration::from_secs(3));
                 assert_eq!(uc_called.load(Relaxed), 2);
 
                 CACHE_MAP.clear();
@@ -701,7 +701,7 @@ mod tests {
                     let record = records_map
                         .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(2));
+                    assert_eq!(record.success_count(), Some(3));
                     assert_eq!(record.failed_count(), Some(0));
                 }
 

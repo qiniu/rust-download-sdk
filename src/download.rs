@@ -331,6 +331,11 @@ impl RangeReader {
             RangeReaderImpl::Async(range_reader) => range_reader.read_last_bytes(buf),
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn is_async(&self) -> bool {
+        matches!(&self.0, RangeReaderImpl::Async(_))
+    }
 }
 
 impl ReadAt for RangeReader {

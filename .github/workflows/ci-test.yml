@@ -27,4 +27,4 @@ jobs:
           RUST_LOG: debug
         with:
           command: test
-          args: -- --show-output --test-threads=1
+          args: -- --nocapture --test-threads=1
