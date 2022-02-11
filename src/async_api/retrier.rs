@@ -45,7 +45,7 @@ impl AsyncRangeReaderWithRangeReader {
         self.inner.io_urls().await
     }
 
-    pub(super) async fn read_at(&self, pos: u64, size: u64) -> IoResult<Vec<u8>> {
+    pub(super) async fn read_at(&self, key: &str, pos: u64, size: u64) -> IoResult<Vec<u8>> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
@@ -54,6 +54,7 @@ impl AsyncRangeReaderWithRangeReader {
                 RangeReaderReadAtRetrier::new(
                     pos,
                     size,
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -69,6 +70,7 @@ impl AsyncRangeReaderWithRangeReader {
 
     pub(super) async fn read_multi_ranges(
         &self,
+        key: &str,
         ranges: &[(u64, u64)],
     ) -> IoResult<Vec<RangePart>> {
         let have_tried: AtomicUsize = Default::default();
@@ -78,6 +80,7 @@ impl AsyncRangeReaderWithRangeReader {
             |async_task_id| {
                 RangeReaderReadMultiRangesRetrier::new(
                     ranges,
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -91,13 +94,14 @@ impl AsyncRangeReaderWithRangeReader {
         .into()
     }
 
-    pub(super) async fn exist(&self) -> IoResult<bool> {
+    pub(super) async fn exist(&self, key: &str) -> IoResult<bool> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
         try_with_timeout(
             |async_task_id| {
                 RangeReaderExistRetrier::new(
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -111,13 +115,14 @@ impl AsyncRangeReaderWithRangeReader {
         .into()
     }
 
-    pub(super) async fn file_size(&self) -> IoResult<u64> {
+    pub(super) async fn file_size(&self, key: &str) -> IoResult<u64> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
         try_with_timeout(
             |async_task_id| {
                 RangeReaderFileSizeRetrier::new(
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -131,13 +136,14 @@ impl AsyncRangeReaderWithRangeReader {
         .into()
     }
 
-    pub(super) async fn download(&self) -> IoResult<Vec<u8>> {
+    pub(super) async fn download(&self, key: &str) -> IoResult<Vec<u8>> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
         try_with_timeout(
             |async_task_id| {
                 RangeReaderDownloadRetrier::new(
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -151,7 +157,7 @@ impl AsyncRangeReaderWithRangeReader {
         .into()
     }
 
-    pub(super) async fn read_last_bytes(&self, size: u64) -> IoResult<(Vec<u8>, u64)> {
+    pub(super) async fn read_last_bytes(&self, key: &str, size: u64) -> IoResult<(Vec<u8>, u64)> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
@@ -159,6 +165,7 @@ impl AsyncRangeReaderWithRangeReader {
             |async_task_id| {
                 RangeReaderReadLastBytesRetrier::new(
                     size,
+                    key,
                     async_task_id,
                     &self.inner,
                     TriesInfo::new(&have_tried, self.total_tries),
@@ -370,9 +377,11 @@ impl<T> MayBeTimeout for RangeReaderRetrier<'_, T> {
 struct RangeReaderReadAtRetrier<'a>(RangeReaderRetrier<'a, Vec<u8>>);
 
 impl<'a> RangeReaderReadAtRetrier<'a> {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         pos: u64,
         size: u64,
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -387,6 +396,7 @@ impl<'a> RangeReaderReadAtRetrier<'a> {
                     .read_at(
                         pos,
                         size,
+                        key,
                         async_task_id,
                         tries_info,
                         trying_hosts,
@@ -422,6 +432,7 @@ struct RangeReaderReadMultiRangesRetrier<'a>(RangeReaderRetrier<'a, Vec<RangePar
 impl<'a> RangeReaderReadMultiRangesRetrier<'a> {
     fn new(
         ranges: &'a [(u64, u64)],
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -435,6 +446,7 @@ impl<'a> RangeReaderReadMultiRangesRetrier<'a> {
                 range_reader
                     .read_multi_ranges(
                         ranges,
+                        key,
                         async_task_id,
                         tries_info,
                         trying_hosts,
@@ -469,6 +481,7 @@ struct RangeReaderExistRetrier<'a>(RangeReaderRetrier<'a, bool>);
 
 impl<'a> RangeReaderExistRetrier<'a> {
     fn new(
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -480,9 +493,13 @@ impl<'a> RangeReaderExistRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .exist(async_task_id, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .exist(
+                        key,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -512,6 +529,7 @@ struct RangeReaderFileSizeRetrier<'a>(RangeReaderRetrier<'a, u64>);
 
 impl<'a> RangeReaderFileSizeRetrier<'a> {
     fn new(
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -523,9 +541,13 @@ impl<'a> RangeReaderFileSizeRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .file_size(async_task_id, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .file_size(
+                        key,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -555,6 +577,7 @@ struct RangeReaderDownloadRetrier<'a>(RangeReaderRetrier<'a, Vec<u8>>);
 
 impl<'a> RangeReaderDownloadRetrier<'a> {
     fn new(
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -566,9 +589,13 @@ impl<'a> RangeReaderDownloadRetrier<'a> {
             range_reader,
             future: Box::pin(async move {
                 range_reader
-                    .download(async_task_id, tries_info, trying_hosts, |host| async move {
-                        set_selected_info(selected_info, host).await
-                    })
+                    .download(
+                        key,
+                        async_task_id,
+                        tries_info,
+                        trying_hosts,
+                        |host| async move { set_selected_info(selected_info, host).await },
+                    )
                     .await
             }),
         })
@@ -599,6 +626,7 @@ struct RangeReaderReadLastBytesRetrier<'a>(RangeReaderRetrier<'a, (Vec<u8>, u64)
 impl<'a> RangeReaderReadLastBytesRetrier<'a> {
     fn new(
         size: u64,
+        key: &'a str,
         async_task_id: usize,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
@@ -612,6 +640,7 @@ impl<'a> RangeReaderReadLastBytesRetrier<'a> {
                 range_reader
                     .read_last_bytes(
                         size,
+                        key,
                         async_task_id,
                         tries_info,
                         trying_hosts,

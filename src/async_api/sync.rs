@@ -1,8 +1,10 @@
 use super::{
     super::{
-        base::download::RangeReaderBuilder as BaseRangeReaderBuilder, sync_api::WriteSeek, Config,
+        base::download::RangeReaderBuilder as BaseRangeReaderBuilder,
+        config::{with_current_qiniu_config, Config},
+        sync_api::WriteSeek,
     },
-    download::{AsyncRangeReader, AsyncRangeReaderBuilder},
+    download::AsyncRangeReaderBuilder,
     retrier::AsyncRangeReaderWithRangeReader,
     RangePart,
 };
@@ -58,8 +60,11 @@ impl From<RangeReaderBuilder> for BaseRangeReaderBuilder {
 }
 
 impl RangeReaderBuilder {
-    pub(crate) fn build(self) -> RangeReader {
-        RangeReader(RangeReaderHandle::new(self))
+    pub(crate) fn build(mut self) -> RangeReader {
+        RangeReader {
+            key: self.0.take_key(),
+            handler: RangeReaderHandle::new(self),
+        }
     }
 
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
@@ -92,10 +97,13 @@ impl BuildAsyncRangeReader for AsyncRangeReaderWithRangeReader {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RangeReader(RangeReaderHandle);
+pub(crate) struct RangeReader {
+    handler: RangeReaderHandle,
+    key: String,
+}
 
 #[derive(Debug, Clone)]
-struct RangeReaderHandle(Arc<RangeReaderHandleInner>);
+pub(crate) struct RangeReaderHandle(Arc<RangeReaderHandleInner>);
 
 type OneshotResponse = Sender<Response>;
 type ThreadSender = UnboundedSender<(Request, OneshotResponse)>;
@@ -110,12 +118,28 @@ struct RangeReaderHandleInner {
 enum Request {
     UpdateUrls,
     IoUrls,
-    ReadAt { pos: u64, size: u64 },
-    ReadMultiRanges { ranges: Vec<(u64, u64)> },
-    Exist,
-    FileSize,
-    Download,
-    ReadLastBytes { size: u64 },
+    ReadAt {
+        key: String,
+        pos: u64,
+        size: u64,
+    },
+    ReadMultiRanges {
+        key: String,
+        ranges: Vec<(u64, u64)>,
+    },
+    Exist {
+        key: String,
+    },
+    FileSize {
+        key: String,
+    },
+    Download {
+        key: String,
+    },
+    ReadLastBytes {
+        key: String,
+        size: u64,
+    },
 }
 
 type Response = IoResult<ResponseData>;
@@ -220,17 +244,22 @@ impl RangeReader {
     }
 
     pub(crate) fn from_env(key: String) -> Option<Self> {
-        AsyncRangeReader::from_env_with_extra_items(key).map(
-            |(range_reader, max_retry_concurrency, total_tries)| {
-                Self(RangeReaderHandle::new(
-                    AsyncRangeReaderWithRangeReader::new(
-                        range_reader,
-                        max_retry_concurrency.unwrap_or(5),
-                        total_tries.unwrap_or(10),
-                    ),
-                ))
-            },
-        )
+        with_current_qiniu_config(|config| {
+            config.and_then(|config| {
+                config.with_key(&key.to_owned(), |config| {
+                    config.get_or_init_async_range_reader_inner(move || {
+                        let max_retry_concurrency = config.max_retry_concurrency().unwrap_or(5);
+                        let total_retries = config.retry().unwrap_or(10);
+                        RangeReaderHandle::new(AsyncRangeReaderWithRangeReader::new(
+                            AsyncRangeReaderBuilder::from_config(String::new(), config).build(),
+                            max_retry_concurrency,
+                            total_retries,
+                        ))
+                    })
+                })
+            })
+        })
+        .map(|handler| Self { handler, key })
     }
 
     pub(crate) fn update_urls(&self) -> bool {
@@ -249,6 +278,7 @@ impl RangeReader {
 
     pub(crate) fn read_multi_ranges(&self, ranges: &[(u64, u64)]) -> IoResult<Vec<RangePart>> {
         match self.execute(Request::ReadMultiRanges {
+            key: self.key.to_owned(),
             ranges: ranges.to_vec(),
         }) {
             Ok(ResponseData::Parts(parts)) => Ok(parts),
@@ -258,7 +288,9 @@ impl RangeReader {
     }
 
     pub(crate) fn exist(&self) -> IoResult<bool> {
-        match self.execute(Request::Exist) {
+        match self.execute(Request::Exist {
+            key: self.key.to_owned(),
+        }) {
             Ok(ResponseData::Bool(existed)) => Ok(existed),
             Err(err) => Err(err),
             response => unexpected_response(response),
@@ -266,7 +298,9 @@ impl RangeReader {
     }
 
     pub(crate) fn file_size(&self) -> IoResult<u64> {
-        match self.execute(Request::FileSize) {
+        match self.execute(Request::FileSize {
+            key: self.key.to_owned(),
+        }) {
             Ok(ResponseData::U64(size)) => Ok(size),
             Err(err) => Err(err),
             response => unexpected_response(response),
@@ -274,7 +308,9 @@ impl RangeReader {
     }
 
     pub(crate) fn download(&self) -> IoResult<Vec<u8>> {
-        match self.execute(Request::Download) {
+        match self.execute(Request::Download {
+            key: self.key.to_owned(),
+        }) {
             Ok(ResponseData::Bytes(bytes)) => Ok(bytes),
             Err(err) => Err(err),
             response => unexpected_response(response),
@@ -289,6 +325,7 @@ impl RangeReader {
 
     pub(crate) fn read_last_bytes(&self, buf: &mut [u8]) -> IoResult<(u64, u64)> {
         match self.execute(Request::ReadLastBytes {
+            key: self.key.to_owned(),
             size: buf.len() as u64,
         }) {
             Ok(ResponseData::BytesWithSize((bytes, total_size))) => {
@@ -301,7 +338,7 @@ impl RangeReader {
     }
 
     fn execute(&self, request: Request) -> Response {
-        self.0.execute_request(request)
+        self.handler.execute_request(request)
     }
 }
 
@@ -310,6 +347,7 @@ impl ReadAt for RangeReader {
         match self.execute(Request::ReadAt {
             pos,
             size: buf.len() as u64,
+            key: self.key.to_owned(),
         }) {
             Ok(ResponseData::Bytes(bytes)) => {
                 buf.copy_from_slice(&bytes);
@@ -326,19 +364,19 @@ impl Request {
         match self {
             Self::UpdateUrls => Ok(ResponseData::Bool(range_reader.update_urls().await)),
             Self::IoUrls => Ok(ResponseData::Strings(range_reader.io_urls().await)),
-            Self::ReadAt { pos, size } => range_reader
-                .read_at(pos, size)
+            Self::ReadAt { key, pos, size } => range_reader
+                .read_at(&key, pos, size)
                 .await
                 .map(ResponseData::Bytes),
-            Self::ReadMultiRanges { ranges } => range_reader
-                .read_multi_ranges(&ranges)
+            Self::ReadMultiRanges { key, ranges } => range_reader
+                .read_multi_ranges(&key, &ranges)
                 .await
                 .map(ResponseData::Parts),
-            Self::Exist => range_reader.exist().await.map(ResponseData::Bool),
-            Self::FileSize => range_reader.file_size().await.map(ResponseData::U64),
-            Self::Download => range_reader.download().await.map(ResponseData::Bytes),
-            Self::ReadLastBytes { size } => range_reader
-                .read_last_bytes(size)
+            Self::Exist { key } => range_reader.exist(&key).await.map(ResponseData::Bool),
+            Self::FileSize { key } => range_reader.file_size(&key).await.map(ResponseData::U64),
+            Self::Download { key } => range_reader.download(&key).await.map(ResponseData::Bytes),
+            Self::ReadLastBytes { key, size } => range_reader
+                .read_last_bytes(&key, size)
                 .await
                 .map(ResponseData::BytesWithSize),
         }

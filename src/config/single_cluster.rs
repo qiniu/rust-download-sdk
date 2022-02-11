@@ -1,5 +1,5 @@
 use super::{
-    super::{async_api::AsyncRangeReaderInner, sync_api::RangeReaderInner},
+    super::{async_api::RangeReaderHandle as AsyncRangeReaderHandle, sync_api::RangeReaderInner},
     ClustersConfigParseError, Timeouts,
 };
 use once_cell::sync::OnceCell;
@@ -7,13 +7,11 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     convert::TryInto,
-    future::Future,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
 use tap::TapFallible;
-use tokio::sync::OnceCell as AsyncOnceCell;
 
 /// 单集群七牛配置信息
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Debug, Default)]
@@ -333,17 +331,13 @@ impl Config {
         self.extra.range_reader_inner.get_or_init(f).to_owned()
     }
 
-    pub(crate) async fn get_or_init_async_range_reader_inner<
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = Arc<AsyncRangeReaderInner>>,
-    >(
+    pub(crate) fn get_or_init_async_range_reader_inner(
         &self,
-        f: F,
-    ) -> Arc<AsyncRangeReaderInner> {
+        f: impl FnOnce() -> AsyncRangeReaderHandle,
+    ) -> AsyncRangeReaderHandle {
         self.extra
             .async_range_reader_inner
             .get_or_init(f)
-            .await
             .to_owned()
     }
 
@@ -515,7 +509,7 @@ impl From<Config> for ConfigBuilder {
 struct Extra {
     original_path: Option<PathBuf>,
     range_reader_inner: OnceCell<Arc<RangeReaderInner>>,
-    async_range_reader_inner: AsyncOnceCell<Arc<AsyncRangeReaderInner>>,
+    async_range_reader_inner: OnceCell<AsyncRangeReaderHandle>,
 }
 
 impl PartialEq for Extra {

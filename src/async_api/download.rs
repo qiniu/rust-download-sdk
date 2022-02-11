@@ -3,10 +3,7 @@
 use super::{
     super::{
         base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
-        config::{
-            build_async_range_reader_builder_from_config, with_current_qiniu_config, Config,
-            Timeouts,
-        },
+        config::{build_async_range_reader_builder_from_config, Config, Timeouts},
     },
     dot::{ApiName, DotType, Dotter},
     host_selector::{HostInfo, HostSelector, HostSelectorBuilder},
@@ -105,13 +102,17 @@ impl From<AsyncRangeReaderBuilder> for BaseRangeReaderBuilder {
 }
 
 impl AsyncRangeReaderBuilder {
+    pub(crate) fn take_key(&mut self) -> String {
+        take(&mut self.0.key)
+    }
+
     pub(crate) fn build(self) -> AsyncRangeReader {
         AsyncRangeReader(Arc::new(AsyncLazy::new(Box::pin(async move {
-            self.build_inner_and_key().await
+            self.build_inner().await
         }))))
     }
 
-    async fn build_inner_and_key(self) -> (Arc<AsyncRangeReaderInner>, String) {
+    async fn build_inner(self) -> Arc<AsyncRangeReaderInner> {
         let builder = self.0;
         let http_client =
             Timeouts::new(builder.base_timeout, builder.dial_timeout).async_http_client();
@@ -158,20 +159,17 @@ impl AsyncRangeReaderBuilder {
         )
         .await;
 
-        return (
-            Arc::new(AsyncRangeReaderInner {
-                io_selector,
-                dotter,
-                http_client,
-                credential: builder.credential,
-                bucket: builder.bucket,
-                use_getfile_api: builder.use_getfile_api,
-                normalize_key: builder.normalize_key,
-                use_https: builder.use_https,
-                private_url_lifetime: builder.private_url_lifetime,
-            }),
-            builder.key,
-        );
+        return Arc::new(AsyncRangeReaderInner {
+            io_selector,
+            dotter,
+            http_client,
+            credential: builder.credential,
+            bucket: builder.bucket,
+            use_getfile_api: builder.use_getfile_api,
+            normalize_key: builder.normalize_key,
+            use_https: builder.use_https,
+            private_url_lifetime: builder.private_url_lifetime,
+        });
 
         #[derive(Clone, Debug)]
         struct HostSelectorParams {
@@ -250,10 +248,10 @@ impl AsyncRangeReaderBuilder {
 }
 
 #[derive(Clone)]
-pub(crate) struct AsyncRangeReader(Arc<AsyncLazy<(Arc<AsyncRangeReaderInner>, String)>>);
+pub(crate) struct AsyncRangeReader(Arc<AsyncLazy<Arc<AsyncRangeReaderInner>>>);
 
 #[derive(Debug)]
-pub(crate) struct AsyncRangeReaderInner {
+struct AsyncRangeReaderInner {
     io_selector: HostSelector,
     dotter: Dotter,
     credential: Credential,
@@ -266,45 +264,42 @@ pub(crate) struct AsyncRangeReaderInner {
 }
 
 impl AsyncRangeReader {
-    pub(super) fn from_env_with_extra_items(
-        key: String,
-    ) -> Option<(Self, Option<usize>, Option<usize>)> {
-        with_current_qiniu_config(|config| {
-            config.and_then(|config| {
-                config.with_key(&key.to_owned(), |config| {
-                    let config = Arc::new(config.to_owned());
-                    let range_reader_config = config.to_owned();
-                    (
-                        config.max_retry_concurrency(),
-                        config.retry(),
-                        Box::pin(async move {
-                            (
-                                config
-                                    .get_or_init_async_range_reader_inner(move || async move {
-                                        AsyncRangeReaderBuilder::from_config(
-                                            String::new(),
-                                            &range_reader_config,
-                                        )
-                                        .build_inner_and_key()
-                                        .await
-                                        .0
-                                    })
-                                    .await,
-                                key,
-                            )
-                        }),
-                    )
-                })
-            })
-        })
-        .map(|(max_retry_concurrency, total_tries, fut)| {
-            (
-                Self(Arc::new(AsyncLazy::new(fut))),
-                max_retry_concurrency,
-                total_tries,
-            )
-        })
-    }
+    // pub(super) fn from_env_with_extra_items(
+    //     key: String,
+    // ) -> Option<(Self, String, Option<usize>, Option<usize>)> {
+    //     with_current_qiniu_config(|config| {
+    //         config.and_then(|config| {
+    //             config.with_key(&key.to_owned(), |config| {
+    //                 let config = Arc::new(config.to_owned());
+    //                 let range_reader_config = config.to_owned();
+    //                 (
+    //                     config.max_retry_concurrency(),
+    //                     config.retry(),
+    //                     Box::pin(async move {
+    //                         config
+    //                             .get_or_init_async_range_reader_inner(move || async move {
+    //                                 AsyncRangeReaderBuilder::from_config(
+    //                                     String::new(),
+    //                                     &range_reader_config,
+    //                                 )
+    //                                 .build_inner()
+    //                                 .await
+    //                             })
+    //                             .await
+    //                     }),
+    //                 )
+    //             })
+    //         })
+    //     })
+    //     .map(|(max_retry_concurrency, total_tries, fut)| {
+    //         (
+    //             Self(Arc::new(AsyncLazy::new(fut))),
+    //             key,
+    //             max_retry_concurrency,
+    //             total_tries,
+    //         )
+    //     })
+    // }
 
     pub(super) async fn update_urls(&self) -> bool {
         self.inner().await.io_selector.update_hosts().await
@@ -346,6 +341,7 @@ impl AsyncRangeReader {
         &self,
         pos: u64,
         size: u64,
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
@@ -355,6 +351,7 @@ impl AsyncRangeReader {
             return Ok(Default::default()).into();
         }
         return self.with_retries(
+            key,
             Method::GET,
             ApiName::RangeReaderReadAt,
             async_task_id,
@@ -424,6 +421,7 @@ impl AsyncRangeReader {
     pub(super) async fn read_multi_ranges<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         ranges: &[(u64, u64)],
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
@@ -431,6 +429,7 @@ impl AsyncRangeReader {
     ) -> IoResult3<Vec<RangePart>> {
         return self
             .with_retries(
+                key,
                 Method::GET,
                 ApiName::RangeReaderReadAt,
                 async_task_id,
@@ -554,12 +553,14 @@ impl AsyncRangeReader {
 
     pub(super) async fn exist<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<bool> {
         self.with_retries(
+            key,
             Method::HEAD,
             ApiName::RangeReaderExist,
             async_task_id,
@@ -612,12 +613,14 @@ impl AsyncRangeReader {
 
     pub(super) async fn file_size<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<u64> {
         self.with_retries(
+            key,
             Method::HEAD,
             ApiName::RangeReaderFileSize,
             async_task_id,
@@ -672,6 +675,7 @@ impl AsyncRangeReader {
 
     pub(super) async fn download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
@@ -681,6 +685,7 @@ impl AsyncRangeReader {
         loop {
             let (chunk, mut completed) = match self
                 ._download(
+                    key,
                     async_task_id,
                     result.len() as u64,
                     tries_info,
@@ -710,6 +715,7 @@ impl AsyncRangeReader {
 
     async fn _download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
+        key: &str,
         async_task_id: usize,
         init_from: u64,
         tries_info: TriesInfo<'_>,
@@ -720,6 +726,7 @@ impl AsyncRangeReader {
         let buf_cursor = Arc::new(Mutex::new(Cursor::new(&mut buf)));
         let result = self
             .with_retries(
+                key,
                 Method::GET,
                 ApiName::RangeReaderDownloadTo,
                 async_task_id,
@@ -810,12 +817,14 @@ impl AsyncRangeReader {
     pub(super) async fn read_last_bytes<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         size: u64,
+        key: &str,
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
     ) -> IoResult3<(Vec<u8>, u64)> {
         return self.with_retries(
+            key,
             Method::GET,
             ApiName::RangeReaderReadLastBytes,
             async_task_id,
@@ -874,11 +883,7 @@ impl AsyncRangeReader {
     }
 
     async fn inner(&self) -> &Arc<AsyncRangeReaderInner> {
-        &self.0.get().await.0
-    }
-
-    async fn key(&self) -> &str {
-        &self.0.get().await.1
+        self.0.get().await
     }
 
     async fn with_retries<
@@ -889,6 +894,7 @@ impl AsyncRangeReader {
         Fut2: Future<Output = ()>,
     >(
         &self,
+        key: &str,
         method: Method,
         api_name: ApiName,
         async_task_id: usize,
@@ -928,7 +934,7 @@ impl AsyncRangeReader {
                     chosen_io_info.host(),
                     inner.credential.access_key(),
                     &inner.bucket,
-                    self.key().await,
+                    key,
                     inner.use_getfile_api,
                     inner.normalize_key,
                 ),
@@ -1375,6 +1381,7 @@ mod tests {
                     .read_at(
                         5,
                         6,
+                        "file",
                         0,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
@@ -1410,6 +1417,7 @@ mod tests {
                     .read_at(
                         5,
                         12,
+                        "file2",
                         0,
                         TriesInfo::new(&have_tried, 1),
                         &Default::default(),
@@ -1483,6 +1491,7 @@ mod tests {
                 .read_at(
                     1,
                     5,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1554,6 +1563,7 @@ mod tests {
                 .read_at(
                     1,
                     5,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -1624,6 +1634,7 @@ mod tests {
             match downloader
                 .read_last_bytes(
                     10,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -1686,6 +1697,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -1702,6 +1714,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -1718,6 +1731,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -1806,6 +1820,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1820,6 +1835,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1834,6 +1850,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1923,6 +1940,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1937,6 +1955,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1951,6 +1970,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 3),
                     &Default::default(),
@@ -1990,6 +2010,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .exist(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2006,6 +2027,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .file_size(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2022,6 +2044,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2097,6 +2120,7 @@ mod tests {
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2150,6 +2174,7 @@ mod tests {
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2211,6 +2236,7 @@ mod tests {
                 match downloader
                     .read_multi_ranges(
                         &ranges,
+                        "file",
                         0,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
@@ -2244,6 +2270,7 @@ mod tests {
                 match downloader
                     .read_multi_ranges(
                         &ranges,
+                        "/file",
                         0,
                         TriesInfo::new(&have_tried, 3),
                         &Default::default(),
@@ -2321,6 +2348,7 @@ mod tests {
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2375,6 +2403,7 @@ mod tests {
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2431,6 +2460,7 @@ mod tests {
             match downloader
                 .read_multi_ranges(
                     &ranges,
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
@@ -2481,6 +2511,7 @@ mod tests {
             let have_tried = AtomicUsize::new(0);
             match downloader
                 .download(
+                    "file",
                     0,
                     TriesInfo::new(&have_tried, 1),
                     &Default::default(),
