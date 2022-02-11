@@ -1,6 +1,6 @@
-use once_cell::sync::Lazy;
 use directories::BaseDirs;
 use log::warn;
+use once_cell::sync::Lazy;
 use std::{
     env::temp_dir,
     fs,

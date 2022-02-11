@@ -953,7 +953,7 @@ mod tests {
         },
         *,
     };
-    use futures::{channel::oneshot::channel, future::join};
+    use futures::channel::oneshot::channel;
     use multipart::client::lazy::Multipart;
     use serde_json::{json, to_vec as json_to_vec};
     use std::{
@@ -982,12 +982,11 @@ mod tests {
             let (tx, rx) = channel();
             let ($addr, server) =
                 warp::serve($routes).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    rx.await.ok();
+                    rx.await.unwrap();
                 });
-            let handler = spawn(server);
+            spawn(server);
             $code;
-            tx.send(()).ok();
-            handler.await.ok();
+            tx.send(()).unwrap();
         }};
         ($io_addr:ident, $monitor_addr:ident, $io_routes:ident, $records_map:ident, $code:block) => {{
             let (io_tx, io_rx) = channel();
@@ -995,7 +994,7 @@ mod tests {
             let ($io_addr, io_server) = warp::serve($io_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    io_rx.await.ok();
+                    io_rx.await.unwrap();
                 },
             );
             let $records_map = Arc::new(DotRecordsDashMap::default());
@@ -1012,14 +1011,13 @@ mod tests {
             };
             let ($monitor_addr, monitor_server) = warp::serve(monitor_routes)
                 .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    monitor_rx.await.ok();
+                    monitor_rx.await.unwrap();
                 });
-            let io_handler = spawn(io_server);
-            let monitor_handler = spawn(monitor_server);
+            spawn(io_server);
+            spawn(monitor_server);
             $code;
-            io_tx.send(()).ok();
-            monitor_tx.send(()).ok();
-            let _ = join(io_handler, monitor_handler).await;
+            io_tx.send(()).unwrap();
+            monitor_tx.send(()).unwrap();
         }};
         ($io_addr:ident, $uc_addr:ident, $io_routes:ident, $code:block) => {{
             let (io_tx, io_rx) = channel();
@@ -1027,7 +1025,7 @@ mod tests {
             let ($io_addr, io_server) = warp::serve($io_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    io_rx.await.ok();
+                    io_rx.await.unwrap();
                 },
             );
             let io_addr = $io_addr.to_owned();
@@ -1050,15 +1048,14 @@ mod tests {
             let ($uc_addr, uc_server) = warp::serve(uc_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    uc_rx.await.ok();
+                    uc_rx.await.unwrap();
                 },
             );
-            let io_handler = spawn(io_server);
-            let uc_handler = spawn(uc_server);
+            spawn(io_server);
+            spawn(uc_server);
             $code;
-            io_tx.send(()).ok();
-            uc_tx.send(()).ok();
-            let _ = join(io_handler, uc_handler).await;
+            io_tx.send(()).unwrap();
+            uc_tx.send(()).unwrap();
         }};
     }
 

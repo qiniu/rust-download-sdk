@@ -745,12 +745,11 @@ mod tests {
             let (tx, rx) = channel();
             let ($addr, server) =
                 warp::serve($routes).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    rx.await.ok();
+                    rx.await.unwrap();
                 });
-            let handler = spawn(server);
+            spawn(server);
             $code;
-            tx.send(()).ok();
-            handler.await.ok();
+            tx.send(()).unwrap();
         }};
     }
 

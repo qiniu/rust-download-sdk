@@ -455,7 +455,7 @@ mod tests {
         },
         *,
     };
-    use futures::{channel::oneshot::channel, future::join};
+    use futures::channel::oneshot::channel;
     use serde::Serialize;
     use serde_json::json;
     use std::{
@@ -484,19 +484,18 @@ mod tests {
             let ($uc_addr, uc_server) = warp::serve($uc_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    uc_rx.await.ok();
+                    uc_rx.await.unwrap();
                 },
             );
             let ($monitor_addr, monitor_server) = warp::serve($monitor_routes)
                 .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    monitor_rx.await.ok();
+                    monitor_rx.await.unwrap();
                 });
-            let uc_handler = spawn(uc_server);
-            let monitor_handler = spawn(monitor_server);
+            spawn(uc_server);
+            spawn(monitor_server);
             $code;
-            uc_tx.send(()).ok();
-            monitor_tx.send(()).ok();
-            let _ = join(uc_handler, monitor_handler).await;
+            uc_tx.send(()).unwrap();
+            monitor_tx.send(()).unwrap();
         }};
     }
 
