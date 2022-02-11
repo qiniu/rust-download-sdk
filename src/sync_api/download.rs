@@ -788,7 +788,7 @@ impl RangeReader {
                 self.inner.private_url_lifetime,
                 &self.inner.credential,
             );
-            let req_id = get_req_id(begin_at, tries);
+            let req_id = get_req_id(begin_at, tries, chosen_io_info.timeout);
             let request_begin_at_instant = Instant::now();
             let request_builder = self
                 .inner

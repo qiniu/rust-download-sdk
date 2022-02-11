@@ -43,7 +43,8 @@ impl Timeouts {
             .to_owned();
 
         fn build_http_client(timeouts: &Timeouts) -> Arc<HttpClient> {
-            const USER_AGENT: &str = concat!("QiniuRustDownload/", env!("CARGO_PKG_VERSION"));
+            const USER_AGENT: &str =
+                concat!("QiniuRustDownload/", env!("CARGO_PKG_VERSION"), "/sync");
             Arc::new(
                 HttpClient::builder()
                     .user_agent(USER_AGENT)
@@ -64,7 +65,8 @@ impl Timeouts {
             .to_owned();
 
         fn build_http_client(timeouts: &Timeouts) -> Arc<AsyncHttpClient> {
-            const USER_AGENT: &str = concat!("QiniuRustDownload/", env!("CARGO_PKG_VERSION"));
+            const USER_AGENT: &str =
+                concat!("QiniuRustDownload/", env!("CARGO_PKG_VERSION"), "/async");
             Arc::new(
                 AsyncHttpClient::builder()
                     .user_agent(USER_AGENT)

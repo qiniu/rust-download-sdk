@@ -11,7 +11,7 @@ use super::{
     dot::{ApiName, DotType, Dotter},
     host_selector::{HostInfo, HostSelector, HostSelectorBuilder},
     query::HostsQuerier,
-    req_id::{get_req_id, REQUEST_ID_HEADER},
+    req_id::{get_req_id2, REQUEST_ID_HEADER},
 };
 use async_once_cell::Lazy as AsyncLazy;
 use futures::{AsyncReadExt, TryStreamExt};
@@ -358,6 +358,7 @@ impl AsyncRangeReader {
         return self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadAt,
+            async_task_id,
             tries_info,
             trying_hosts,
             on_host_selected,
@@ -433,6 +434,7 @@ impl AsyncRangeReader {
             .with_retries(
                 Method::GET,
                 ApiName::RangeReaderReadAt,
+                async_task_id,
                 tries_info,
                 trying_hosts,
                 on_host_selected,
@@ -561,6 +563,7 @@ impl AsyncRangeReader {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderExist,
+            async_task_id,
             tries_info,
             trying_hosts,
             on_host_selected,
@@ -618,6 +621,7 @@ impl AsyncRangeReader {
         self.with_retries(
             Method::HEAD,
             ApiName::RangeReaderFileSize,
+            async_task_id,
             tries_info,
             trying_hosts,
             on_host_selected,
@@ -680,6 +684,7 @@ impl AsyncRangeReader {
             .with_retries(
                 Method::GET,
                 ApiName::RangeReaderDownloadTo,
+                async_task_id,
                 tries_info,
                 trying_hosts,
                 on_host_selected,
@@ -766,6 +771,7 @@ impl AsyncRangeReader {
         return self.with_retries(
             Method::GET,
             ApiName::RangeReaderReadLastBytes,
+            async_task_id,
             tries_info,
             trying_hosts,
             on_host_selected,
@@ -838,6 +844,7 @@ impl AsyncRangeReader {
         &self,
         method: Method,
         api_name: ApiName,
+        async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         mut on_host_selected: F2,
@@ -881,7 +888,12 @@ impl AsyncRangeReader {
                 inner.private_url_lifetime,
                 &inner.credential,
             );
-            let req_id = get_req_id(begin_at, tries);
+            let req_id = get_req_id2(
+                begin_at,
+                tries,
+                async_task_id,
+                chosen_io_info.host_info.timeout(),
+            );
             let request_begin_at_instant = Instant::now();
             let request_builder = inner
                 .http_client
