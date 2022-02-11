@@ -7,6 +7,7 @@ use super::{
     RangePart,
 };
 use futures::{
+    future::poll_fn,
     pin_mut, ready,
     task::{waker, ArcWake},
 };
@@ -21,7 +22,6 @@ use std::{
     thread::{Builder as ThreadBuilder, JoinHandle, Thread},
 };
 use tokio::{
-    macros::support::poll_fn,
     runtime::Builder as TokioRuntimeBuilder,
     spawn as spawn_tokio,
     sync::{
