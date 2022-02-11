@@ -676,8 +676,47 @@ impl AsyncRangeReader {
         async_task_id: usize,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
-        on_host_selected: F,
+        mut on_host_selected: F,
     ) -> IoResult3<Vec<u8>> {
+        let mut result = Vec::new();
+        loop {
+            let (chunk, mut completed) = match self
+                ._download(
+                    async_task_id,
+                    result.len() as u64,
+                    tries_info,
+                    trying_hosts,
+                    &mut on_host_selected,
+                )
+                .await
+            {
+                Result3::Ok(result) => result,
+                Result3::Err(err) => return Result3::Err(err),
+                Result3::NoMoreTries(err) => return Result3::NoMoreTries(err),
+            };
+            if result.is_empty() {
+                result = chunk;
+            } else if chunk.is_empty() {
+                completed = true;
+            } else {
+                result.extend(chunk);
+            }
+            if completed {
+                return Result3::Ok(result);
+            } else {
+                info!("Early EOF Response Body is detected in {}::download(), will start a new GET request for the rest body", module_path!());
+            }
+        }
+    }
+
+    async fn _download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
+        &self,
+        async_task_id: usize,
+        init_from: u64,
+        tries_info: TriesInfo<'_>,
+        trying_hosts: &TryingHosts,
+        on_host_selected: F,
+    ) -> IoResult3<(Vec<u8>, bool)> {
         let mut buf = Vec::new();
         let buf_cursor = Arc::new(Mutex::new(Cursor::new(&mut buf)));
         let result = self
@@ -692,7 +731,7 @@ impl AsyncRangeReader {
                     let buf_cursor = buf_cursor.to_owned();
                     async move {
                         let mut buf_cursor = buf_cursor.lock().await;
-                        let start_from = buf_cursor.position();
+                        let start_from = init_from + buf_cursor.position();
                         debug!(
                             "{{{}}} [{}] download_to url: {}, req_id: {:?}, start_from: {}",
                             async_task_id, tries, download_url, req_id, start_from
@@ -714,13 +753,22 @@ impl AsyncRangeReader {
                         }
                         let result = result.map_err(io_error_from(IoErrorKind::ConnectionAborted));
                         match result {
-                            Ok(resp) => write_to_writer(resp,  &mut *buf_cursor).await,
+                            Ok(resp) => {
+                                let content_length = parse_content_length(&resp);
+                                write_to_writer(resp,  &mut *buf_cursor).await.map(|actually_downloaded| {
+                                    if let Some(actually_downloaded) = actually_downloaded {
+                                        (actually_downloaded, actually_downloaded < content_length)
+                                    } else {
+                                        (0, false)
+                                    }
+                                })
+                            },
                             Err(err) => Err(err),
                         }
-                        .tap_ok(|_| {
+                        .tap_ok(|(downloaded, incompleted)| {
                             info!(
-                                "{{{}}} [{}] download ok url: {}, start_from: {}, req_id: {:?}, elapsed: {:?}",
-                                async_task_id, tries, download_url, start_from, req_id, begin_at.elapsed(),
+                                "{{{}}} [{}] download ok url: {}, start_from: {}, downloaded: {}, completed: {:?}, req_id: {:?}, elapsed: {:?}",
+                                async_task_id, tries, download_url, start_from, downloaded, !incompleted, req_id, begin_at.elapsed(),
                             );
                         })
                         .tap_err(|err| {
@@ -734,7 +782,7 @@ impl AsyncRangeReader {
             )
             .await;
         return match result {
-            Result3::Ok(_) => Ok(buf).into(),
+            Result3::Ok((_, incompleted)) => Ok((buf, !incompleted)).into(),
             Result3::Err(err) => Result3::Err(err),
             Result3::NoMoreTries(err) => Result3::NoMoreTries(err),
         };
@@ -742,9 +790,9 @@ impl AsyncRangeReader {
         async fn write_to_writer<W: AsyncWrite + Unpin>(
             resp: HttpResponse,
             mut writer: W,
-        ) -> IoResult<()> {
+        ) -> IoResult<Option<u64>> {
             if resp.status() == StatusCode::RANGE_NOT_SATISFIABLE {
-                Ok(())
+                Ok(None)
             } else if resp.status() != StatusCode::OK
                 && resp.status() != StatusCode::PARTIAL_CONTENT
             {
@@ -755,7 +803,7 @@ impl AsyncRangeReader {
                     .map_err(io_error_from(IoErrorKind::BrokenPipe));
                 io_copy(&mut body.into_async_read().compat(), &mut writer)
                     .await
-                    .map(|_| ())
+                    .map(Some)
             }
         }
     }

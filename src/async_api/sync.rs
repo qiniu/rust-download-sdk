@@ -548,7 +548,7 @@ mod tests {
                         "bucket".to_owned(),
                         "file".to_owned(),
                         get_credential(),
-                        io_urls.to_owned(),
+                        io_urls,
                     )
                     .use_getfile_api(false)
                     .normalize_key(true),
