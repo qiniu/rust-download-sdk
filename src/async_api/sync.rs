@@ -431,8 +431,16 @@ fn unexpected_response(response: Response) -> ! {
 #[cfg(test)]
 mod tests {
     use super::{super::super::Credential, *};
-    use hyper::header::{HeaderValue, RANGE};
-    use std::{thread::spawn as spawn_thread, time::Duration};
+    use hyper::{
+        header::{HeaderValue, CONTENT_RANGE, CONTENT_TYPE, RANGE},
+        StatusCode,
+    };
+    use multipart::client::lazy::Multipart;
+    use std::{
+        io::{Cursor, Read},
+        thread::spawn as spawn_thread,
+        time::Duration,
+    };
     use text_io::scan as scan_text;
     use tokio::task::{spawn, spawn_blocking};
     use warp::{header, path, reply::Response, Filter};
@@ -510,6 +518,148 @@ mod tests {
             .await?;
         });
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_synced_read_last_bytes() -> anyhow::Result<()> {
+        env_logger::try_init().ok();
+
+        let io_routes =
+            path!("file")
+                .and(header::value(RANGE.as_str()))
+                .map(|range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=-10");
+                    let mut resp = Response::new("1234567890".into());
+                    *resp.status_mut() = StatusCode::PARTIAL_CONTENT;
+                    resp.headers_mut().insert(
+                        CONTENT_RANGE,
+                        "bytes 157286390-157286399/157286400".parse().unwrap(),
+                    );
+                    resp
+                });
+
+        starts_with_server!(io_addr, io_routes, {
+            spawn_blocking(move || {
+                let io_urls = vec![format!("http://{}", io_addr)];
+
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls.to_owned(),
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true),
+                )
+                .build();
+
+                let mut buf = [0u8; 10];
+                assert_eq!(
+                    downloader.read_last_bytes(&mut buf).unwrap(),
+                    (10, 157286400)
+                );
+                assert_eq!(&buf, b"1234567890");
+            })
+            .await?;
+        });
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_synced_download() -> anyhow::Result<()> {
+        env_logger::try_init().ok();
+
+        let io_routes = { path!("file").map(|| Response::new("1234567890".into())) };
+        starts_with_server!(io_addr, io_routes, {
+            spawn_blocking(move || {
+                let io_urls = vec![format!("http://{}", io_addr)];
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true),
+                )
+                .build();
+                assert!(downloader.exist().unwrap());
+                assert_eq!(downloader.file_size().unwrap(), 10);
+                assert_eq!(&downloader.download().unwrap(), b"1234567890");
+            })
+            .await?;
+        });
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_synced_read_multi_ranges() -> anyhow::Result<()> {
+        env_logger::try_init().ok();
+
+        let routes = {
+            path!("file")
+                .and(header::value(RANGE.as_str()))
+                .map(move |range: HeaderValue| {
+                    assert_eq!(range.to_str().unwrap(), "bytes=0-4,5-9");
+                    let mut response_body = Multipart::new();
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"12345"),
+                        None,
+                        None,
+                        Some("bytes 0-4/10"),
+                    );
+                    response_body.add_stream(
+                        "",
+                        Cursor::new(b"67890"),
+                        None,
+                        None,
+                        Some("bytes 5-9/19"),
+                    );
+                    let mut fields = response_body.prepare().unwrap();
+                    let mut buffer = Vec::new();
+                    fields.read_to_end(&mut buffer).unwrap();
+                    let mut response = Response::new(buffer.into());
+                    *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+                    response.headers_mut().insert(
+                        CONTENT_TYPE,
+                        ("multipart/form-data; boundary=".to_owned() + fields.boundary())
+                            .parse()
+                            .unwrap(),
+                    );
+                    response
+                })
+        };
+
+        starts_with_server!(addr, routes, {
+            spawn_blocking(move || {
+                let io_urls = vec![format!("http://{}", addr)];
+                let downloader = RangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true),
+                )
+                .build();
+                let ranges = [(0, 5), (5, 5)];
+                let parts = downloader.read_multi_ranges(&ranges).unwrap();
+                assert_eq!(parts.len(), 2);
+                assert_eq!(&parts.get(1).unwrap().data, b"12345");
+                assert_eq!(parts.get(1).unwrap().range, (0, 5));
+                assert_eq!(&parts.get(0).unwrap().data, b"67890");
+                assert_eq!(parts.get(0).unwrap().range, (5, 5));
+            })
+            .await?;
+        });
         Ok(())
     }
 }
