@@ -157,8 +157,8 @@ impl HostsQuerier {
     ) -> IOResult<Vec<String>> {
         Lazy::force(&CACHE_INIT);
 
-        let response_body = self.query_for_domains(ak, bucket)?;
-        return Ok(response_body
+        Ok(self
+            .query_for_domains(ak, bucket)?
             .hosts
             .first()
             .expect("No host in uc query v4 response body")
@@ -166,18 +166,7 @@ impl HostsQuerier {
             .domains
             .iter()
             .map(|domain| normalize_domain(domain, use_https))
-            .collect());
-
-        #[inline]
-        fn normalize_domain(domain: &str, use_https: bool) -> String {
-            if domain.contains("://") {
-                domain.to_string()
-            } else if use_https {
-                "https://".to_owned() + domain
-            } else {
-                "http://".to_owned() + domain
-            }
-        }
+            .collect())
     }
 
     fn query_for_domains(&self, ak: &str, bucket: &str) -> IOResult<ResponseBody> {
@@ -256,6 +245,7 @@ fn query_for_domains_without_cache(
                 ak.as_ref(),
                 bucket.as_ref()
             );
+            let use_https = parse_url_protocol(host).unwrap_or(false);
 
             let url = Url::parse_with_params(
                 &format!("{}/v4/query", host),
@@ -296,7 +286,7 @@ fn query_for_domains_without_cache(
                             host.uc
                                 .domains
                                 .iter()
-                                .map(|domain| domain.to_string())
+                                .map(|domain| normalize_domain(domain, use_https))
                                 .collect()
                         })
                         .expect("No host in uc query v4 response body");
@@ -438,6 +428,28 @@ fn save_cache() -> IOResult<()> {
         json_to_writer(&mut cache_file, &*CACHE_MAP)
             .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
         Ok(())
+    }
+}
+
+#[inline]
+fn normalize_domain(domain: &str, use_https: bool) -> String {
+    if domain.contains("://") {
+        domain.to_string()
+    } else if use_https {
+        "https://".to_owned() + domain
+    } else {
+        "http://".to_owned() + domain
+    }
+}
+
+#[inline]
+fn parse_url_protocol(url: &str) -> Option<bool> {
+    if url.starts_with("https://") {
+        Some(true)
+    } else if url.starts_with("http://") {
+        Some(false)
+    } else {
+        None
     }
 }
 
@@ -585,8 +597,11 @@ mod tests {
                     HostsQuerier::new(host_selector, 1, dotter, Timeouts::default_http_client());
                 let io_urls = querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(&io_urls, &["http://iovip.qbox.me".to_owned()]);
-                assert_eq!(&querier.uc_selector.hosts(), &["uc.qbox.me".to_owned()]);
-                assert_eq!(&querier.uc_selector.select_host().host, "uc.qbox.me");
+                assert_eq!(
+                    &querier.uc_selector.hosts(),
+                    &["http://uc.qbox.me".to_owned()]
+                );
+                assert_eq!(&querier.uc_selector.select_host().host, "http://uc.qbox.me");
                 sleep(Duration::from_secs(5));
                 assert_eq!(monitor_called.load(Relaxed), 1);
                 Ok(())
