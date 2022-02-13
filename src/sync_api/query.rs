@@ -6,7 +6,7 @@ use super::{
 use dashmap::DashMap;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use reqwest::{blocking::Client as HTTPClient, StatusCode};
+use reqwest::{blocking::Client as HTTPClient, StatusCode, Url};
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -23,7 +23,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tap::prelude::*;
-use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CacheKey {
@@ -152,7 +151,7 @@ impl HostsQuerier {
         Lazy::force(&CACHE_INIT);
 
         Ok(self
-            .query_for_domains(ak, bucket)?
+            .query_for_domains(ak, bucket, use_https)?
             .hosts
             .first()
             .expect("No host in uc query v4 response body")
@@ -163,7 +162,7 @@ impl HostsQuerier {
             .collect())
     }
 
-    fn query_for_domains(&self, ak: &str, bucket: &str) -> IOResult<ResponseBody> {
+    fn query_for_domains(&self, ak: &str, bucket: &str, use_https: bool) -> IOResult<ResponseBody> {
         let cache_key = CacheKey::new(ak.into(), bucket.into(), self.uc_selector.all_hosts_crc32());
 
         let mut modified = false;
@@ -173,6 +172,7 @@ impl HostsQuerier {
                 let result = query_for_domains_without_cache(
                     ak,
                     bucket,
+                    use_https,
                     &self.uc_selector,
                     self.uc_tries,
                     &self.http_client,
@@ -198,6 +198,7 @@ impl HostsQuerier {
                         if let Ok(new_cache_value) = query_for_domains_without_cache(
                             ak,
                             bucket,
+                            use_https,
                             &uc_selector,
                             uc_tries,
                             &http_client,
@@ -223,6 +224,7 @@ impl HostsQuerier {
 fn query_for_domains_without_cache(
     ak: impl AsRef<str>,
     bucket: impl AsRef<str>,
+    use_https: bool,
     uc_selector: &HostSelector,
     uc_tries: usize,
     http_client: &HTTPClient,
@@ -239,7 +241,6 @@ fn query_for_domains_without_cache(
                 ak.as_ref(),
                 bucket.as_ref()
             );
-            let use_https = parse_url_protocol(host).unwrap_or(false);
 
             let url = Url::parse_with_params(
                 &format!("{}/v4/query", host),
@@ -432,17 +433,6 @@ fn normalize_domain(domain: &str, use_https: bool) -> String {
         "https://".to_owned() + domain
     } else {
         "http://".to_owned() + domain
-    }
-}
-
-#[inline]
-fn parse_url_protocol(url: &str) -> Option<bool> {
-    if url.starts_with("https://") {
-        Some(true)
-    } else if url.starts_with("http://") {
-        Some(false)
-    } else {
-        None
     }
 }
 

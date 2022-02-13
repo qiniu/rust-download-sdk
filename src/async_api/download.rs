@@ -22,7 +22,7 @@ use multer::Multipart;
 use reqwest::{
     header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
     Client as HttpClient, Error as ReqwestError, Method, RequestBuilder as HttpRequestBuilder,
-    Response as HttpResponse, StatusCode,
+    Response as HttpResponse, StatusCode, Url,
 };
 use std::{
     collections::HashSet,
@@ -46,7 +46,6 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_util::{compat::FuturesAsyncReadCompatExt, either::Either};
-use url::Url;
 
 /// 为私有空间签发对象下载 URL
 /// # Arguments

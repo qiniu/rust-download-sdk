@@ -6,7 +6,7 @@ use super::{
 use futures::TryFutureExt;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use reqwest::{Client as HttpClient, StatusCode};
+use reqwest::{Client as HttpClient, StatusCode, Url};
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -28,7 +28,6 @@ use tokio::{
     spawn,
     sync::{Mutex, OnceCell, RwLock},
 };
-use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CacheKey {
@@ -150,7 +149,7 @@ impl HostsQuerier {
         bucket: &str,
         use_https: bool,
     ) -> IoResult<Vec<String>> {
-        let response_body = self.query_for_domains(ak, bucket).await?;
+        let response_body = self.query_for_domains(ak, bucket, use_https).await?;
         return Ok(response_body
             .hosts
             .first()
@@ -160,19 +159,14 @@ impl HostsQuerier {
             .iter()
             .map(|domain| normalize_domain(domain, use_https))
             .collect());
-
-        fn normalize_domain(domain: &str, use_https: bool) -> String {
-            if domain.contains("://") {
-                domain.to_string()
-            } else if use_https {
-                "https://".to_owned() + domain
-            } else {
-                "http://".to_owned() + domain
-            }
-        }
     }
 
-    async fn query_for_domains(&self, ak: &str, bucket: &str) -> IoResult<ResponseBody> {
+    async fn query_for_domains(
+        &self,
+        ak: &str,
+        bucket: &str,
+        use_https: bool,
+    ) -> IoResult<ResponseBody> {
         let cache_key = CacheKey::new(
             ak.into(),
             bucket.into(),
@@ -187,6 +181,7 @@ impl HostsQuerier {
                 None => query_for_domains_without_cache(
                     ak,
                     bucket,
+                    use_https,
                     &self.uc_selector,
                     self.uc_tries,
                     &self.http_client,
@@ -215,6 +210,7 @@ impl HostsQuerier {
                         let new_cache_value = query_for_domains_without_cache(
                             ak,
                             bucket,
+                            use_https,
                             &uc_selector,
                             uc_tries,
                             &http_client,
@@ -241,6 +237,7 @@ impl HostsQuerier {
 async fn query_for_domains_without_cache(
     ak: impl AsRef<str>,
     bucket: impl AsRef<str>,
+    use_https: bool,
     uc_selector: &HostSelector,
     uc_tries: usize,
     http_client: &HttpClient,
@@ -308,7 +305,7 @@ async fn query_for_domains_without_cache(
                     host.uc
                         .domains
                         .iter()
-                        .map(|domain| domain.to_string())
+                        .map(|domain| normalize_domain(domain, use_https))
                         .collect()
                 })
                 .expect("No host in uc query v4 response body");
@@ -484,6 +481,16 @@ async fn save_cache() -> IoResult<()> {
     }
 }
 
+fn normalize_domain(domain: &str, use_https: bool) -> String {
+    if domain.contains("://") {
+        domain.to_string()
+    } else if use_https {
+        "https://".to_owned() + domain
+    } else {
+        "http://".to_owned() + domain
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -629,7 +636,7 @@ mod tests {
             assert_eq!(&io_urls, &["http://iovip.qbox.me".to_owned()]);
             assert_eq!(
                 &querier.uc_selector.hosts().await,
-                &["uc.qbox.me".to_owned()]
+                &["http://uc.qbox.me".to_owned()]
             );
             assert_eq!(
                 querier
@@ -638,7 +645,7 @@ mod tests {
                     .await
                     .unwrap()
                     .host(),
-                "uc.qbox.me"
+                "http://uc.qbox.me"
             );
             sleep(Duration::from_secs(5)).await;
             assert_eq!(monitor_called.load(Relaxed), 1);

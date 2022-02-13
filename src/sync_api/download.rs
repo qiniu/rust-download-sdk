@@ -19,7 +19,7 @@ use reqwest::{
         Client as HTTPClient, RequestBuilder as HTTPRequestBuilder, Response as HTTPResponse,
     },
     header::{HeaderValue, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, RANGE},
-    Error as ReqwestError, Method, StatusCode,
+    Error as ReqwestError, Method, StatusCode, Url,
 };
 use std::{
     io::{
@@ -33,7 +33,6 @@ use std::{
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
-use url::Url;
 
 #[derive(Debug)]
 pub(crate) struct RangeReader {
