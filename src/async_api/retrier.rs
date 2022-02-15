@@ -181,7 +181,7 @@ impl AsyncRangeReaderWithRangeReader {
 }
 
 #[async_trait]
-trait MayBeTimeout {
+trait MaybeTimeout {
     async fn base_timeout(&self) -> Duration;
     async fn increase_timeout_power_if_timed_out(self);
 }
@@ -208,7 +208,7 @@ impl<T> From<TryResult<T>> for IoResult<T> {
 
 async fn try_with_timeout<
     Output,
-    T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync,
+    T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
     F: Fn(usize) -> T,
 >(
     f: F,
@@ -216,13 +216,13 @@ async fn try_with_timeout<
 ) -> TryResult<Output> {
     struct FutWithIdx<
         Output,
-        T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync,
+        T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
     > {
         idx: usize,
         fut: T,
     }
 
-    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync> Future
+    impl<Output, T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync> Future
         for FutWithIdx<Output, T>
     {
         type Output = IoResult3<Output>;
@@ -233,8 +233,8 @@ async fn try_with_timeout<
     }
 
     #[async_trait]
-    impl<Output, T: Future<Output = IoResult3<Output>> + MayBeTimeout + Unpin + Send + Sync>
-        MayBeTimeout for FutWithIdx<Output, T>
+    impl<Output, T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync>
+        MaybeTimeout for FutWithIdx<Output, T>
     {
         async fn base_timeout(&self) -> Duration {
             self.fut.base_timeout().await
@@ -321,7 +321,7 @@ async fn try_with_timeout<
         TryResult::AllTimedOut
     };
 
-    async fn punish_all_timed_out_futures<I: IntoIterator<Item = Item>, Item: MayBeTimeout>(
+    async fn punish_all_timed_out_futures<I: IntoIterator<Item = Item>, Item: MaybeTimeout>(
         iter: I,
     ) {
         join_all(
@@ -355,7 +355,7 @@ impl<T> Future for RangeReaderRetrier<'_, T> {
 }
 
 #[async_trait]
-impl<T> MayBeTimeout for RangeReaderRetrier<'_, T> {
+impl<T> MaybeTimeout for RangeReaderRetrier<'_, T> {
     async fn increase_timeout_power_if_timed_out(self) {
         if let Some(selected_info) = self.selected_info.0.read().await.as_ref() {
             if selected_info.selected_at.elapsed() > selected_info.host_info.timeout() {
@@ -417,7 +417,7 @@ impl Future for RangeReaderReadAtRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderReadAtRetrier<'_> {
+impl MaybeTimeout for RangeReaderReadAtRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -467,7 +467,7 @@ impl Future for RangeReaderReadMultiRangesRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderReadMultiRangesRetrier<'_> {
+impl MaybeTimeout for RangeReaderReadMultiRangesRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -515,7 +515,7 @@ impl Future for RangeReaderExistRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderExistRetrier<'_> {
+impl MaybeTimeout for RangeReaderExistRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -563,7 +563,7 @@ impl Future for RangeReaderFileSizeRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderFileSizeRetrier<'_> {
+impl MaybeTimeout for RangeReaderFileSizeRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -611,7 +611,7 @@ impl Future for RangeReaderDownloadRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderDownloadRetrier<'_> {
+impl MaybeTimeout for RangeReaderDownloadRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -661,7 +661,7 @@ impl Future for RangeReaderReadLastBytesRetrier<'_> {
 }
 
 #[async_trait]
-impl MayBeTimeout for RangeReaderReadLastBytesRetrier<'_> {
+impl MaybeTimeout for RangeReaderReadLastBytesRetrier<'_> {
     async fn increase_timeout_power_if_timed_out(self) {
         self.0.increase_timeout_power_if_timed_out().await
     }
@@ -718,7 +718,7 @@ mod tests {
     }
 
     #[async_trait]
-    impl<T: Send + Sync> MayBeTimeout for FakedRetrier<T> {
+    impl<T: Send + Sync> MaybeTimeout for FakedRetrier<T> {
         async fn base_timeout(&self) -> Duration {
             self.base_timeout
         }
