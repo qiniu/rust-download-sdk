@@ -1,12 +1,12 @@
 use super::{
-    cache_dir_path_of,
+    cache_dir::cache_dir_path_of,
     dot::{ApiName, DotType, Dotter},
     host_selector::HostSelector,
 };
 use dashmap::DashMap;
 use log::{info, warn};
 use once_cell::sync::Lazy;
-use reqwest::{blocking::Client as HTTPClient, StatusCode};
+use reqwest::{blocking::Client as HTTPClient, StatusCode, Url};
 use serde::{
     de::{Error as DeError, Visitor},
     Deserialize, Deserializer, Serialize, Serializer,
@@ -23,7 +23,6 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tap::prelude::*;
-use url::Url;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 struct CacheKey {
@@ -33,7 +32,6 @@ struct CacheKey {
 }
 
 impl CacheKey {
-    #[inline]
     fn new(ak: Box<str>, bucket: Box<str>, hosts_crc32: u32) -> Self {
         Self {
             ak,
@@ -44,7 +42,6 @@ impl CacheKey {
 }
 
 impl Serialize for CacheKey {
-    #[inline]
     fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         s.collect_str(&format!(
             "cache-key-v2:{}:{}:{}",
@@ -58,7 +55,6 @@ struct CacheKeyVisitor;
 impl<'de> Visitor<'de> for CacheKeyVisitor {
     type Value = CacheKey;
 
-    #[inline]
     fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.write_str("Key of cache")
     }
@@ -89,7 +85,6 @@ impl<'de> Visitor<'de> for CacheKeyVisitor {
 }
 
 impl<'de> Deserialize<'de> for CacheKey {
-    #[inline]
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         d.deserialize_str(CacheKeyVisitor)
     }
@@ -133,7 +128,6 @@ pub(super) struct HostsQuerier {
 }
 
 impl HostsQuerier {
-    #[inline]
     pub(super) fn new(
         uc_selector: HostSelector,
         uc_tries: usize,
@@ -148,7 +142,6 @@ impl HostsQuerier {
         }
     }
 
-    #[inline]
     pub(super) fn query_for_io_urls(
         &self,
         ak: &str,
@@ -158,7 +151,7 @@ impl HostsQuerier {
         Lazy::force(&CACHE_INIT);
 
         Ok(self
-            .query_for_domains(ak, bucket)?
+            .query_for_domains(ak, bucket, use_https)?
             .hosts
             .first()
             .expect("No host in uc query v4 response body")
@@ -169,7 +162,7 @@ impl HostsQuerier {
             .collect())
     }
 
-    fn query_for_domains(&self, ak: &str, bucket: &str) -> IOResult<ResponseBody> {
+    fn query_for_domains(&self, ak: &str, bucket: &str, use_https: bool) -> IOResult<ResponseBody> {
         let cache_key = CacheKey::new(ak.into(), bucket.into(), self.uc_selector.all_hosts_crc32());
 
         let mut modified = false;
@@ -179,6 +172,7 @@ impl HostsQuerier {
                 let result = query_for_domains_without_cache(
                     ak,
                     bucket,
+                    use_https,
                     &self.uc_selector,
                     self.uc_tries,
                     &self.http_client,
@@ -204,6 +198,7 @@ impl HostsQuerier {
                         if let Ok(new_cache_value) = query_for_domains_without_cache(
                             ak,
                             bucket,
+                            use_https,
                             &uc_selector,
                             uc_tries,
                             &http_client,
@@ -229,6 +224,7 @@ impl HostsQuerier {
 fn query_for_domains_without_cache(
     ak: impl AsRef<str>,
     bucket: impl AsRef<str>,
+    use_https: bool,
     uc_selector: &HostSelector,
     uc_tries: usize,
     http_client: &HTTPClient,
@@ -245,7 +241,6 @@ fn query_for_domains_without_cache(
                 ak.as_ref(),
                 bucket.as_ref()
             );
-            let use_https = parse_url_protocol(host).unwrap_or(false);
 
             let url = Url::parse_with_params(
                 &format!("{}/v4/query", host),
@@ -418,7 +413,6 @@ fn save_cache() -> IOResult<()> {
     }
     return Ok(());
 
-    #[inline]
     fn _save_cache(cache_file_path: &Path) -> anyhow::Result<()> {
         let mut cache_file = OpenOptions::new()
             .write(true)
@@ -442,28 +436,16 @@ fn normalize_domain(domain: &str, use_https: bool) -> String {
     }
 }
 
-#[inline]
-fn parse_url_protocol(url: &str) -> Option<bool> {
-    if url.starts_with("https://") {
-        Some(true)
-    } else if url.starts_with("http://") {
-        Some(false)
-    } else {
-        None
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
         super::{
-            base::credential::Credential,
-            config::Timeouts,
+            super::{base::credential::Credential, config::Timeouts},
             dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
         },
         *,
     };
-    use futures::{channel::oneshot::channel, future::join};
+    use futures::channel::oneshot::channel;
     use serde::Serialize;
     use serde_json::json;
     use std::{
@@ -492,19 +474,18 @@ mod tests {
             let ($uc_addr, uc_server) = warp::serve($uc_routes).bind_with_graceful_shutdown(
                 ([127, 0, 0, 1], 0),
                 async move {
-                    uc_rx.await.ok();
+                    uc_rx.await.unwrap();
                 },
             );
             let ($monitor_addr, monitor_server) = warp::serve($monitor_routes)
                 .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    monitor_rx.await.ok();
+                    monitor_rx.await.unwrap();
                 });
-            let uc_handler = spawn(uc_server);
-            let monitor_handler = spawn(monitor_server);
+            spawn(uc_server);
+            spawn(monitor_server);
             $code;
-            uc_tx.send(()).ok();
-            monitor_tx.send(()).ok();
-            let _ = join(uc_handler, monitor_handler).await;
+            uc_tx.send(()).unwrap();
+            monitor_tx.send(()).unwrap();
         }};
     }
 
@@ -518,7 +499,6 @@ mod tests {
     const SECRET_KEY: &str = "abcdefghijklmnioqrstuv";
     const BUCKET_NAME: &str = "test-bucket";
 
-    #[inline]
     fn get_credential() -> Credential {
         Credential::new(ACCESS_KEY, SECRET_KEY)
     }
@@ -690,13 +670,13 @@ mod tests {
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(uc_called.load(Relaxed), 1);
 
-                sleep(Duration::from_secs(1));
+                sleep(Duration::from_secs(3));
 
                 io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(uc_called.load(Relaxed), 1);
 
-                sleep(Duration::from_secs(1));
+                sleep(Duration::from_secs(3));
                 assert_eq!(uc_called.load(Relaxed), 2);
 
                 CACHE_MAP.clear();
@@ -711,7 +691,7 @@ mod tests {
                     let record = records_map
                         .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(2));
+                    assert_eq!(record.success_count(), Some(3));
                     assert_eq!(record.failed_count(), Some(0));
                 }
 

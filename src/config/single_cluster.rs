@@ -1,4 +1,7 @@
-use super::{super::download::RangeReaderInner, ClustersConfigParseError, Timeouts};
+use super::{
+    super::{async_api::RangeReaderHandle as AsyncRangeReaderHandle, sync_api::RangeReaderInner},
+    ClustersConfigParseError, Timeouts,
+};
 use once_cell::sync::OnceCell;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -38,6 +41,7 @@ pub struct Config {
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
+    max_retry_concurrency: Option<usize>,
 
     #[serde(skip)]
     extra: Extra,
@@ -57,12 +61,10 @@ impl Config {
         ConfigBuilder::new(access_key, secret_key, bucket, io_urls)
     }
 
-    #[inline]
     pub(super) fn with_key<T>(&self, _key: &str, f: impl FnOnce(&Config) -> T) -> Option<T> {
         Some(f(self))
     }
 
-    #[inline]
     pub(super) fn parse(path: &Path, bytes: &[u8]) -> Result<Self, ClustersConfigParseError> {
         match path.extension().and_then(|s| s.to_str()) {
             Some("toml") => toml::from_slice(bytes).map_err(|err| err.into()),
@@ -285,18 +287,29 @@ impl Config {
         self
     }
 
+    /// 获取最大并行重试次数
     #[inline]
+    pub fn max_retry_concurrency(&self) -> Option<usize> {
+        self.max_retry_concurrency
+    }
+
+    /// 设置最大并行重试次数，如果设置为 Some(0) 则表示禁止并行重试功能
+    #[inline]
+    pub fn set_max_retry_concurrency(&mut self, max_retry_concurrency: Option<usize>) -> &mut Self {
+        self.max_retry_concurrency = max_retry_concurrency;
+        self.uninit_range_reader_inner();
+        self
+    }
+
     pub(super) fn original_path(&self) -> Option<&Path> {
         self.extra.original_path.as_ref().map(|p| p.as_ref())
     }
 
-    #[inline]
     #[allow(dead_code)]
     pub(super) fn original_path_mut(&mut self) -> &mut Option<PathBuf> {
         &mut self.extra.original_path
     }
 
-    #[inline]
     pub(super) fn config_paths(&self) -> Vec<PathBuf> {
         self.extra
             .original_path
@@ -305,14 +318,12 @@ impl Config {
             .unwrap_or_default()
     }
 
-    #[inline]
     pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
         let mut set = HashSet::with_capacity(1);
         set.insert(Timeouts::from(self));
         set
     }
 
-    #[inline]
     pub(crate) fn get_or_init_range_reader_inner(
         &self,
         f: impl FnOnce() -> Arc<RangeReaderInner>,
@@ -320,9 +331,19 @@ impl Config {
         self.extra.range_reader_inner.get_or_init(f).to_owned()
     }
 
-    #[inline]
+    pub(crate) fn get_or_init_async_range_reader_inner(
+        &self,
+        f: impl FnOnce() -> AsyncRangeReaderHandle,
+    ) -> AsyncRangeReaderHandle {
+        self.extra
+            .async_range_reader_inner
+            .get_or_init(f)
+            .to_owned()
+    }
+
     fn uninit_range_reader_inner(&mut self) {
         self.extra.range_reader_inner.take();
+        self.extra.async_range_reader_inner.take();
     }
 }
 
@@ -448,6 +469,13 @@ impl ConfigBuilder {
         self
     }
 
+    /// 配置最大并行重试次数，默认为 5，如果设置为 Some(0) 则表示禁止并行重试功能
+    #[inline]
+    pub fn max_retry_concurrency(mut self, max_retry_concurrency: Option<usize>) -> Self {
+        self.0.max_retry_concurrency = max_retry_concurrency;
+        self
+    }
+
     /// 设置打点记录上传频率，默认为 10 秒
     #[inline]
     pub fn dot_interval(mut self, dot_interval: Option<Duration>) -> Self {
@@ -481,6 +509,7 @@ impl From<Config> for ConfigBuilder {
 struct Extra {
     original_path: Option<PathBuf>,
     range_reader_inner: OnceCell<Arc<RangeReaderInner>>,
+    async_range_reader_inner: OnceCell<AsyncRangeReaderHandle>,
 }
 
 impl PartialEq for Extra {

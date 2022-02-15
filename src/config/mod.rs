@@ -13,7 +13,11 @@ pub use multi_clusters::{
 };
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
-use super::{base::credential::Credential, download::RangeReaderBuilder};
+use super::{
+    async_api::AsyncRangeReaderBuilder,
+    base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
+    sync_api::RangeReaderBuilder,
+};
 use log::{error, info, warn};
 use static_vars::qiniu_config;
 use std::{env, fs, sync::RwLock, time::Duration};
@@ -108,12 +112,10 @@ fn load_config() -> Option<Configurable> {
     }
 }
 
-#[inline]
 fn init_config() -> RwLock<Option<Configurable>> {
     RwLock::new(load_config().tap(|config| ensure_watches_for(config.as_ref())))
 }
 
-#[inline]
 fn ensure_watches_for(config: Option<&Configurable>) {
     if env::var_os(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV).is_none() {
         if let Some(config) = config {
@@ -124,7 +126,6 @@ fn ensure_watches_for(config: Option<&Configurable>) {
     }
 }
 
-#[inline]
 fn ensure_http_clients_for(config: Option<&Configurable>) {
     if let Some(config) = config {
         ensure_http_clients(&config.timeouts_set());
@@ -133,14 +134,12 @@ fn ensure_http_clients_for(config: Option<&Configurable>) {
     }
 }
 
-#[inline]
 fn reload_config(migrate_callback: bool) {
     if let Some(config) = load_config() {
         set_config_and_reload(config, migrate_callback)
     }
 }
 
-#[inline]
 fn set_config_and_reload(mut config: Configurable, migrate_callback: bool) {
     with_current_qiniu_config_mut(|current| {
         if migrate_callback {
@@ -169,11 +168,11 @@ pub enum ClustersConfigParseError {
     TOMLError(#[from] toml::de::Error),
 }
 
-pub(super) fn build_range_reader_builder_from_config(
+pub(super) fn build_base_range_reader_builder_from_config(
     key: String,
     config: &Config,
-) -> RangeReaderBuilder {
-    let mut builder = RangeReaderBuilder::new(
+) -> BaseRangeReaderBuilder {
+    let mut builder = BaseRangeReaderBuilder::new(
         config.bucket().to_owned(),
         key,
         Credential::new(config.access_key(), config.secret_key()),
@@ -197,7 +196,7 @@ pub(super) fn build_range_reader_builder_from_config(
 
     if let Some(retry) = config.retry() {
         if retry > 0 {
-            builder = builder.io_tries(retry).dot_tries(retry);
+            builder = builder.io_tries(retry).uc_tries(retry).dot_tries(retry);
         }
     }
 
@@ -225,6 +224,10 @@ pub(super) fn build_range_reader_builder_from_config(
         }
     }
 
+    if let Some(max_retry_concurrency) = config.max_retry_concurrency() {
+        builder = builder.max_retry_concurrency(max_retry_concurrency);
+    }
+
     if let Some(true) = config.private() {
         builder = builder.private_url_lifetime(Some(Duration::from_secs(3600)));
     }
@@ -240,25 +243,39 @@ pub(super) fn build_range_reader_builder_from_config(
     builder
 }
 
-pub(super) fn build_range_reader_builder_from_env(
+pub(super) fn build_range_reader_builder_from_config(
+    key: String,
+    config: &Config,
+) -> RangeReaderBuilder {
+    build_base_range_reader_builder_from_config(key, config).into()
+}
+
+pub(super) fn build_base_range_reader_builder_from_env(
     key: String,
     only_single_cluster: bool,
-) -> Option<RangeReaderBuilder> {
+) -> Option<BaseRangeReaderBuilder> {
     with_current_qiniu_config(|config| {
         config.and_then(|config| {
             if only_single_cluster && config.as_single().is_some() {
                 return None;
             }
             config.with_key(&key.to_owned(), move |config| {
-                build_range_reader_builder_from_config(key, config)
+                build_base_range_reader_builder_from_config(key, config)
             })
         })
     })
 }
 
+pub(super) fn build_async_range_reader_builder_from_config(
+    key: String,
+    config: &Config,
+) -> AsyncRangeReaderBuilder {
+    build_base_range_reader_builder_from_config(key, config).into()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{super::download::RangeReader, static_vars::reset_static_vars, *};
+    use super::{super::RangeReader, static_vars::reset_static_vars, *};
     use anyhow::Result;
     use std::{
         collections::HashMap,
@@ -913,6 +930,7 @@ mod tests {
                 "test-bucket-1",
                 Some(vec!["http://io-11.com".into(), "http://io-12.com".into()]),
             )
+            .max_retry_concurrency(Some(1))
             .build();
             let mut tempfile = TempFileBuilder::new()
                 .prefix("1-")
@@ -929,6 +947,7 @@ mod tests {
                 "test-bucket-2",
                 Some(vec!["http://io-21.com".into(), "http://io-22.com".into()]),
             )
+            .max_retry_concurrency(Some(0))
             .build();
             let mut tempfile = TempFileBuilder::new()
                 .prefix("2-")
@@ -952,15 +971,23 @@ mod tests {
         };
         let _env_guard = QiniuMultiEnvGuard::new(tempfile_path.as_os_str());
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
-            vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
-        );
-        assert_eq!(
-            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
-            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
-        );
-        assert!(RangeReader::from_env("/node3/file1").is_none());
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-11.com".to_owned(), "http://io-12.com".to_owned()]
+            );
+            assert!(downloader.is_async());
+        }
+        {
+            let downloader = RangeReader::from_env("/node2/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+            );
+            assert!(!downloader.is_async());
+        }
+        assert!(RangeReader::from_env("/node3/file1".to_owned()).is_none());
 
         {
             let config = ConfigBuilder::new(
@@ -969,23 +996,32 @@ mod tests {
                 "test-bucket-1",
                 Some(vec!["http://io-112.com".into(), "http://io-122.com".into()]),
             )
+            .max_retry_concurrency(Some(0))
             .build();
             fs::write(&tempfile_path_1, &toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
-            vec![
-                "http://io-112.com".to_owned(),
-                "http://io-122.com".to_owned()
-            ]
-        );
-        assert_eq!(
-            RangeReader::from_env("/node2/file1").unwrap().io_urls(),
-            vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
-        );
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec![
+                    "http://io-112.com".to_owned(),
+                    "http://io-122.com".to_owned()
+                ]
+            );
+            assert!(!downloader.is_async());
+        }
+        {
+            let downloader = RangeReader::from_env("/node2/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec!["http://io-21.com".to_owned(), "http://io-22.com".to_owned()]
+            );
+            assert!(!downloader.is_async());
+        }
 
         {
             let mut config = HashMap::with_capacity(2);
@@ -995,14 +1031,18 @@ mod tests {
 
         sleep(Duration::from_secs(1));
 
-        assert_eq!(
-            RangeReader::from_env("/node1/file1").unwrap().io_urls(),
-            vec![
-                "http://io-112.com".to_owned(),
-                "http://io-122.com".to_owned()
-            ]
-        );
-        assert!(RangeReader::from_env("/node2/file1").is_none());
+        {
+            let downloader = RangeReader::from_env("/node1/file1".to_owned()).unwrap();
+            assert_eq!(
+                downloader.io_urls(),
+                vec![
+                    "http://io-112.com".to_owned(),
+                    "http://io-122.com".to_owned()
+                ]
+            );
+            assert!(!downloader.is_async());
+        }
+        assert!(RangeReader::from_env("/node2/file1".to_owned()).is_none());
 
         Ok(())
     }
@@ -1010,7 +1050,6 @@ mod tests {
     struct ResetFinally;
 
     impl Drop for ResetFinally {
-        #[inline]
         fn drop(&mut self) {
             reset_static_vars();
             unwatch_all().unwrap();
@@ -1020,7 +1059,6 @@ mod tests {
     struct QiniuHotReloadingEnvGuard;
 
     impl QiniuHotReloadingEnvGuard {
-        #[inline]
         fn new() -> Self {
             env::set_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV, "1");
             Self
@@ -1028,7 +1066,6 @@ mod tests {
     }
 
     impl Drop for QiniuHotReloadingEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_DISABLE_CONFIG_HOT_RELOADING_ENV)
         }
@@ -1037,7 +1074,6 @@ mod tests {
     struct QiniuEnvGuard;
 
     impl QiniuEnvGuard {
-        #[inline]
         fn new(val: &OsStr) -> Self {
             env::set_var(QINIU_ENV, val);
             Self
@@ -1045,7 +1081,6 @@ mod tests {
     }
 
     impl Drop for QiniuEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_ENV)
         }
@@ -1054,7 +1089,6 @@ mod tests {
     struct QiniuMultiEnvGuard;
 
     impl QiniuMultiEnvGuard {
-        #[inline]
         fn new(val: &OsStr) -> Self {
             env::set_var(QINIU_MULTI_ENV, val);
             Self
@@ -1062,7 +1096,6 @@ mod tests {
     }
 
     impl Drop for QiniuMultiEnvGuard {
-        #[inline]
         fn drop(&mut self) {
             env::remove_var(QINIU_MULTI_ENV)
         }

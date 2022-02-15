@@ -1,50 +1,54 @@
 use super::{
-    base::{credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token},
-    cache_dir_path_of,
-    host_selector::{HostSelector, PunishResult},
+    super::base::{
+        credential::Credential, upload_policy::UploadPolicy, upload_token::sign_upload_token,
+    },
+    cache_dir::cache_dir_path_of,
+    host_selector::{HostInfo, HostSelector, PunishResult},
 };
 use dashmap::DashMap;
-use fd_lock::FdLock;
+use fd_lock::RwLock as FdRwLock;
 use log::{debug, info, warn};
-use reqwest::{blocking::Client as HTTPClient, header::AUTHORIZATION, StatusCode};
+use reqwest::{header::AUTHORIZATION, Client as HttpClient, StatusCode};
 use serde::{de::Error as DeserializeError, Deserialize, Serialize};
 use serde_json::Value as JSONValue;
 use std::{
     collections::HashMap,
     convert::TryFrom,
     fmt,
-    fs::{File, OpenOptions},
-    io::{
-        BufRead, BufReader, Error as IOError, ErrorKind as IOErrorKind, Result as IOResult, Seek,
-        SeekFrom, Write,
-    },
+    future::Future,
+    io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult, SeekFrom},
     ops::Deref,
     sync::{
         atomic::{AtomicBool, Ordering::Relaxed},
-        Arc, Mutex,
+        Arc,
     },
-    thread::Builder as ThreadBuilder,
     time::{Duration, Instant, SystemTime},
     u128,
 };
 use tap::prelude::*;
+use tokio::{
+    fs::{File, OpenOptions},
+    io::{AsyncBufReadExt, AsyncSeekExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter},
+    spawn,
+    sync::Mutex,
+};
 
 static DOTTING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// 禁止打点功能
-#[inline]
+
 pub fn disable_dotting() {
     DOTTING_DISABLED.store(true, Relaxed)
 }
 
 /// 启用打点功能
-#[inline]
+
 pub fn enable_dotting() {
     DOTTING_DISABLED.store(false, Relaxed)
 }
 
 /// 打点功能是否启用
-#[inline]
+
 pub fn is_dotting_disabled() -> bool {
     DOTTING_DISABLED.load(Relaxed)
 }
@@ -52,19 +56,19 @@ pub fn is_dotting_disabled() -> bool {
 static DOT_UPLOADING_DISABLED: AtomicBool = AtomicBool::new(false);
 
 /// 禁止打点上传功能
-#[inline]
+
 pub fn disable_dot_uploading() {
     DOT_UPLOADING_DISABLED.store(true, Relaxed)
 }
 
 /// 启用打点上传功能
-#[inline]
+
 pub fn enable_dot_uploading() {
     DOT_UPLOADING_DISABLED.store(false, Relaxed)
 }
 
 /// 打点上传功能是否启用
-#[inline]
+
 pub fn is_dot_uploading_disabled() -> bool {
     DOT_UPLOADING_DISABLED.load(Relaxed)
 }
@@ -126,20 +130,20 @@ struct DotterInner {
     bucket: String,
     monitor_selector: HostSelector,
     buffered_records: DotRecordsDashMap,
-    buffered_file: Mutex<FdLock<File>>,
+    buffered_file: Mutex<FdRwLock<File>>,
     interval: Duration,
     uploaded_at: Instant,
     max_buffer_size: u64,
     tries: usize,
-    http_client: Arc<HTTPClient>,
+    http_client: Arc<HttpClient>,
 }
 
 pub(super) const DOT_FILE_NAME: &str = "dot-file";
 
 impl Dotter {
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn new(
-        http_client: Arc<HTTPClient>,
+    pub(super) async fn new(
+        http_client: Arc<HttpClient>,
         credential: Credential,
         bucket: String,
         monitor_urls: Vec<String>,
@@ -152,19 +156,21 @@ impl Dotter {
         base_timeout: Option<Duration>,
     ) -> Dotter {
         if !monitor_urls.is_empty() {
-            if let Ok(buffered_file_path) = cache_dir_path_of(DOT_FILE_NAME) {
+            if let Ok(buffered_file_path) = cache_dir_path_of(DOT_FILE_NAME).await {
                 if let Ok(buffer_file) = OpenOptions::new()
                     .create(true)
                     .write(true)
                     .append(true)
                     .open(&buffered_file_path)
+                    .await
                 {
                     let monitor_selector = HostSelector::builder(monitor_urls)
                         .punish_duration(punish_duration.unwrap_or_else(|| Duration::from_secs(30)))
                         .max_punished_times(max_punished_times.unwrap_or(5))
                         .max_punished_hosts_percent(max_punished_hosts_percent.unwrap_or(50))
                         .base_timeout(base_timeout.unwrap_or_else(|| Duration::from_secs(1)))
-                        .build();
+                        .build()
+                        .await;
                     return Self {
                         inner: Some(Arc::new(DotterInner {
                             credential,
@@ -172,7 +178,7 @@ impl Dotter {
                             monitor_selector,
                             http_client,
                             buffered_records: Default::default(),
-                            buffered_file: Mutex::new(FdLock::new(buffer_file)),
+                            buffered_file: Mutex::new(FdRwLock::new(buffer_file)),
                             interval: interval.unwrap_or_else(|| Duration::from_secs(10)),
                             uploaded_at: Instant::now(),
                             max_buffer_size: max_buffer_size.unwrap_or(1 << 20),
@@ -185,40 +191,44 @@ impl Dotter {
         Self { inner: None }
     }
 
-    pub(super) fn dot(
+    pub(super) async fn dot(
         &self,
         dot_type: DotType,
         api_name: ApiName,
         successful: bool,
         elapsed_duration: Duration,
-    ) -> IOResult<()> {
+    ) -> IoResult<()> {
         if is_dotting_disabled() {
             debug!("dotting is disabled")
         } else if let Some(inner) = self.inner.as_ref() {
             inner.fast_dot(dot_type, api_name, successful, elapsed_duration);
-            inner.lock_buffered_file(|buffered_file| {
-                inner.flush_to_file(buffered_file)?;
-                if inner.is_time_to_upload(buffered_file)? {
-                    self.async_upload();
-                }
-                Ok(())
-            })?;
+            inner
+                .lock_buffered_file(|mut buffered_file| async move {
+                    inner.flush_to_file(&mut buffered_file).await?;
+                    if inner.is_time_to_upload(&buffered_file).await? {
+                        self.async_upload();
+                    }
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
     }
 
-    pub(super) fn punish(&self) -> IOResult<()> {
+    pub(super) async fn punish(&self) -> IoResult<()> {
         if is_dotting_disabled() {
             debug!("dotting is disabled")
         } else if let Some(inner) = self.inner.as_ref() {
             inner.fast_punish();
-            inner.lock_buffered_file(|buffered_file| {
-                inner.flush_to_file(buffered_file)?;
-                if inner.is_time_to_upload(buffered_file)? {
-                    self.async_upload();
-                }
-                Ok(())
-            })?;
+            inner
+                .lock_buffered_file(|mut buffered_file| async move {
+                    inner.flush_to_file(&mut buffered_file).await?;
+                    if inner.is_time_to_upload(&buffered_file).await? {
+                        self.async_upload();
+                    }
+                    Ok(())
+                })
+                .await?;
         }
         Ok(())
     }
@@ -226,22 +236,17 @@ impl Dotter {
     fn async_upload(&self) {
         if let Some(inner) = self.inner.as_ref() {
             let inner = inner.to_owned();
-            if let Err(err) = ThreadBuilder::new()
-                .name("dots-uploader".into())
-                .spawn(move || {
-                    inner.lock_buffered_file(|buffered_file| {
-                        if inner.is_time_to_upload(buffered_file)? {
-                            inner.sync_upload()?;
+            spawn(async move {
+                let inner2 = inner.to_owned();
+                inner
+                    .lock_buffered_file(|buffered_file| async move {
+                        if inner2.is_time_to_upload(&buffered_file).await? {
+                            inner2.do_upload().await?;
                         }
                         Ok(())
                     })
-                })
-            {
-                warn!(
-                    "failed to start thread `dots-uploader` to upload dots: {:?}",
-                    err
-                );
-            }
+                    .await
+            });
         }
     }
 }
@@ -276,28 +281,43 @@ impl DotterInner {
         self.buffered_records.merge_with_record(record);
     }
 
-    #[inline]
     fn fast_punish(&self) {
         self.buffered_records
             .merge_with_record(DotRecord::punished());
     }
 
-    #[inline]
-    fn flush_to_file(&self, buffered_file: &mut File) -> IOResult<()> {
-        self.buffered_records
-            .retain(|_, r| write_to_file(r, buffered_file).is_err());
+    async fn flush_to_file(&self, buffered_file: &mut File) -> IoResult<()> {
+        let mut buffered_file = BufWriter::new(buffered_file);
+        for shard in self.buffered_records.shards() {
+            let mut map = shard.write();
+            let mut to_delete_keys = Vec::new();
+            for (key, value) in map.iter() {
+                if write_to_file(value.get(), &mut buffered_file).await.is_ok() {
+                    to_delete_keys.push(*key);
+                }
+            }
+            for key in to_delete_keys.iter() {
+                map.remove(key);
+            }
+        }
+        buffered_file.flush().await?;
 
         return Ok(());
 
-        #[inline]
-        fn write_to_file(record: &DotRecord, file: &mut File) -> anyhow::Result<()> {
-            writeln!(file, "{}", serde_json::to_string(record)?)
+        async fn write_to_file<W: AsyncWrite + Unpin>(
+            record: &DotRecord,
+            file: &mut W,
+        ) -> anyhow::Result<()> {
+            let mut line = serde_json::to_string(record)?;
+            line.push('\n');
+            file.write_all(line.as_bytes())
+                .await
                 .tap_err(|err| warn!("the dot file is failed to write: {:?}", err))?;
             Ok(())
         }
     }
 
-    fn is_time_to_upload(&self, buffered_file: &File) -> IOResult<bool> {
+    async fn is_time_to_upload(&self, buffered_file: &File) -> IoResult<bool> {
         if is_dotting_disabled() || is_dot_uploading_disabled() {
             debug!("dot uploading is disabled, will not upload the dot file now");
             return Ok(false);
@@ -305,6 +325,7 @@ impl DotterInner {
         let result = self.uploaded_at.elapsed() > self.interval
             || buffered_file
                 .metadata()
+                .await
                 .tap_err(|err| warn!("stat the dot file error: {:?}", err))?
                 .len()
                 > self.max_buffer_size;
@@ -314,13 +335,14 @@ impl DotterInner {
         Ok(result)
     }
 
-    fn sync_upload(&self) -> IOResult<()> {
-        let mut buffered_file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&cache_dir_path_of(DOT_FILE_NAME)?)?;
-        self.upload_with_retry(|monitor_host, timeout, timeout_power| {
-            let url = format!("{}/v1/stat", monitor_host);
+    async fn do_upload(&self) -> IoResult<()> {
+        self.upload_with_retry(|host_info| async move {
+            let mut buffered_file = OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&cache_dir_path_of(DOT_FILE_NAME).await?)
+                .await?;
+            let url = format!("{}/v1/stat", host_info.host());
             debug!("try to upload dots to {}", url);
             let uptoken = sign_upload_token(
                 &self.credential,
@@ -333,20 +355,21 @@ impl DotterInner {
             self.http_client
                 .post(&url)
                 .header(AUTHORIZATION, format!("UpToken {}", uptoken))
-                .json(&self.make_request_body(&mut buffered_file)?)
-                .timeout(timeout)
+                .json(&self.make_request_body(&mut buffered_file).await?)
+                .timeout(host_info.timeout())
                 .send()
+                .await
                 .tap_err(|err| {
                     if err.is_timeout() {
                         self.monitor_selector
-                            .increase_timeout_power_by(monitor_host, timeout_power);
+                            .increase_timeout_power_by(host_info.host(), host_info.timeout_power());
                     }
                 })
-                .map_err(|err| IOError::new(IOErrorKind::ConnectionAborted, err))
+                .map_err(|err| IoError::new(IoErrorKind::ConnectionAborted, err))
                 .and_then(|resp| {
                     if resp.status() != StatusCode::OK {
-                        Err(IOError::new(
-                            IOErrorKind::Other,
+                        Err(IoError::new(
+                            IoErrorKind::Other,
                             format!("Unexpected status code {}", resp.status().as_u16()),
                         ))
                     } else {
@@ -363,19 +386,20 @@ impl DotterInner {
                 })
                 .tap_ok(|_| info!("upload dots succeed"))
                 .tap_err(|err| warn!("failed to upload dots: {:?}", err))?;
+            buffered_file.set_len(0).await?;
             Ok(())
-        })?;
-        buffered_file.set_len(0)?;
+        })
+        .await?;
         Ok(())
     }
 
-    fn make_request_body(&self, buffered_file: &mut File) -> IOResult<DotRecords> {
-        buffered_file.seek(SeekFrom::Start(0))?;
+    async fn make_request_body(&self, buffered_file: &mut File) -> IoResult<DotRecords> {
+        buffered_file.seek(SeekFrom::Start(0)).await?;
         let file_reader = BufReader::new(buffered_file);
+        let mut lines = file_reader.lines();
         let mut map = DotRecordsMap::default();
 
-        for line in file_reader.lines() {
-            let line = line?;
+        while let Some(line) = lines.next_line().await? {
             if line.is_empty() {
                 continue;
             }
@@ -386,51 +410,60 @@ impl DotterInner {
         Ok(map.into_records())
     }
 
-    fn upload_with_retry(
+    async fn upload_with_retry<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = IoResult<()>>>(
         &self,
-        mut for_each_host: impl FnMut(&str, Duration, usize) -> IOResult<()>,
-    ) -> IOResult<()> {
+        mut for_each_host: F,
+    ) -> IoResult<()> {
         let mut last_error = None;
         for _ in 0..self.tries {
-            let host_info = self.monitor_selector.select_host();
-            match for_each_host(&host_info.host, host_info.timeout, host_info.timeout_power) {
-                Ok(response) => {
-                    self.monitor_selector.reward(&host_info.host);
-                    return Ok(response);
-                }
-                Err(err) => {
-                    let punished_result = self
-                        .monitor_selector
-                        .punish_without_dotter(&host_info.host, &err);
-                    match punished_result {
-                        PunishResult::NoPunishment => {
-                            return Err(err);
-                        }
-                        PunishResult::PunishedAndFreezed => {
-                            self.fast_punish();
-                        }
-                        PunishResult::Punished => {}
+            // 允许选择重复的节点，因为生产环境上可能只有一台 kodomonitor，只能选它
+            if let Some(host_info) = self.monitor_selector.select_host(&Default::default()).await {
+                match for_each_host(host_info.to_owned()).await {
+                    Ok(response) => {
+                        self.monitor_selector.reward(host_info.host()).await;
+                        return Ok(response);
                     }
-                    last_error = Some(err);
+                    Err(err) => {
+                        let punished_result = self
+                            .monitor_selector
+                            .punish_without_dotter(host_info.host(), &err)
+                            .await;
+                        match punished_result {
+                            PunishResult::NoPunishment => {
+                                return Err(err);
+                            }
+                            PunishResult::PunishedAndFreezed => {
+                                self.fast_punish();
+                            }
+                            PunishResult::Punished => {}
+                        }
+                        last_error = Some(err);
+                    }
                 }
+            } else {
+                break;
             }
         }
-        Err(last_error.expect("No Monitor tries error"))
+        last_error.map(Err).unwrap_or(Ok(()))
     }
 
     #[cfg(not(test))]
-    fn lock_buffered_file(&self, f: impl FnOnce(&mut File) -> IOResult<()>) -> IOResult<()> {
+    async fn lock_buffered_file<F: FnOnce(File) -> Fut, Fut: Future<Output = IoResult<()>>>(
+        &self,
+        f: F,
+    ) -> IoResult<()> {
         if let Ok(mut buffered_file) = self.buffered_file.try_lock() {
             loop {
-                match buffered_file.try_lock() {
-                    Ok(mut buffered_file) => {
-                        return f(&mut buffered_file);
+                match buffered_file.try_write() {
+                    Ok(buffered_file) => {
+                        let buffered_file = buffered_file.try_clone().await?;
+                        return f(buffered_file).await;
                     }
-                    Err(err) if err.kind() == IOErrorKind::WouldBlock => {
+                    Err(err) if err.kind() == IoErrorKind::WouldBlock => {
                         debug!("the dot file is locked");
                         return Ok(());
                     }
-                    Err(err) if err.kind() == IOErrorKind::Interrupted => {
+                    Err(err) if err.kind() == IoErrorKind::Interrupted => {
                         continue;
                     }
                     Err(err) => {
@@ -446,24 +479,26 @@ impl DotterInner {
     }
 
     #[cfg(test)]
-    fn lock_buffered_file(&self, f: impl FnOnce(&mut File) -> IOResult<()>) -> IOResult<()> {
-        if let Ok(mut buffered_file) = self.buffered_file.lock() {
-            loop {
-                match buffered_file.lock() {
-                    Ok(mut buffered_file) => {
-                        return f(&mut buffered_file);
-                    }
-                    Err(err) if err.kind() == IOErrorKind::Interrupted => {
-                        continue;
-                    }
-                    Err(err) => {
-                        warn!("lock the dot file error: {:?}", err);
-                        return Err(err);
-                    }
+    async fn lock_buffered_file<F: FnOnce(File) -> T, T: Future<Output = IoResult<()>>>(
+        &self,
+        f: F,
+    ) -> IoResult<()> {
+        let mut buffered_file = self.buffered_file.lock().await;
+        loop {
+            match buffered_file.write() {
+                Ok(buffered_file) => {
+                    let buffered_file = buffered_file.try_clone().await?;
+                    return f(buffered_file).await;
+                }
+                Err(err) if err.kind() == IoErrorKind::Interrupted => {
+                    continue;
+                }
+                Err(err) => {
+                    warn!("lock the dot file error: {:?}", err);
+                    return Err(err);
                 }
             }
         }
-        Ok(())
     }
 }
 
@@ -478,12 +513,10 @@ pub(super) enum DotRecordKey {
 }
 
 impl DotRecordKey {
-    #[inline]
     pub(super) fn new(dot_type: DotType, api_name: ApiName) -> Self {
         Self::APICalls { dot_type, api_name }
     }
 
-    #[inline]
     pub(super) fn punished() -> Self {
         Self::PunishedCount
     }
@@ -514,7 +547,6 @@ pub(super) struct PunishedCountDotRecord {
 }
 
 impl DotRecord {
-    #[inline]
     fn new(
         dot_type: DotType,
         api_name: ApiName,
@@ -533,12 +565,10 @@ impl DotRecord {
         })
     }
 
-    #[inline]
     fn punished() -> Self {
         Self::PunishedCount(PunishedCountDotRecord { punished_count: 1 })
     }
 
-    #[inline]
     pub(super) fn key(&self) -> DotRecordKey {
         match self {
             Self::APICalls(record) => DotRecordKey::new(record.dot_type, record.api_name),
@@ -547,7 +577,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn dot_type(&self) -> Option<DotType> {
         match self {
             Self::APICalls(record) => Some(record.dot_type),
@@ -556,7 +586,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn api_name(&self) -> Option<ApiName> {
         match self {
             Self::APICalls(record) => Some(record.api_name),
@@ -565,7 +595,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn success_count(&self) -> Option<usize> {
         match self {
             Self::APICalls(record) => Some(record.success_count),
@@ -574,7 +604,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn success_avg_elapsed_duration_ms(&self) -> Option<u128> {
         match self {
             Self::APICalls(record) => Some(record.success_avg_elapsed_duration),
@@ -583,7 +613,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn failed_count(&self) -> Option<usize> {
         match self {
             Self::APICalls(record) => Some(record.failed_count),
@@ -592,7 +622,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn failed_avg_elapsed_duration_ms(&self) -> Option<u128> {
         match self {
             Self::APICalls(record) => Some(record.failed_avg_elapsed_duration),
@@ -601,7 +631,7 @@ impl DotRecord {
     }
 
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn punished_count(&self) -> Option<usize> {
         match self {
             Self::PunishedCount(record) => Some(record.punished_count),
@@ -634,7 +664,7 @@ pub(super) struct DotRecords {
 
 impl DotRecords {
     #[cfg(test)]
-    #[inline]
+
     pub(super) fn records(&self) -> &[DotRecord] {
         self.records.as_ref()
     }
@@ -678,7 +708,6 @@ impl DotRecordsMap {
             })
             .or_insert(record);
 
-        #[inline]
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
         }
@@ -702,7 +731,6 @@ impl DotRecordsMap {
 impl Deref for DotRecordsMap {
     type Target = HashMap<DotRecordKey, DotRecord>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.m
     }
@@ -746,7 +774,6 @@ impl DotRecordsDashMap {
             })
             .or_insert(record);
 
-        #[inline]
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
         }
@@ -770,7 +797,6 @@ impl DotRecordsDashMap {
 impl Deref for DotRecordsDashMap {
     type Target = DashMap<DotRecordKey, DotRecord>;
 
-    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.m
     }
@@ -781,9 +807,9 @@ mod tests {
     use super::*;
     use crate::config::Timeouts;
     use futures::channel::oneshot::channel;
-    use rayon::ThreadPoolBuilder;
-    use std::{error::Error, sync::atomic::AtomicUsize, thread::sleep};
-    use tokio::task::{spawn, spawn_blocking};
+    use futures::future::join_all;
+    use std::{error::Error, sync::atomic::AtomicUsize};
+    use tokio::{fs::remove_file, task::spawn, time::sleep};
     use warp::{http::HeaderValue, hyper::Body, path, reply::Response, Filter};
 
     macro_rules! starts_with_server {
@@ -791,12 +817,12 @@ mod tests {
             let (tx, rx) = channel();
             let ($addr, server) =
                 warp::serve($routes).bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
-                    rx.await.ok();
+                    rx.await.unwrap();
                 });
-            let handler = spawn(server);
+            spawn(server);
+            sleep(Duration::from_secs(1)).await;
             $code;
-            tx.send(()).ok();
-            handler.await.ok();
+            tx.send(()).unwrap();
         }};
     }
 
@@ -832,7 +858,6 @@ mod tests {
     }
     use guard::DottingDisableGuard;
 
-    #[inline]
     fn get_credential() -> Credential {
         Credential::new(ACCESS_KEY, SECRET_KEY)
     }
@@ -840,7 +865,7 @@ mod tests {
     #[tokio::test]
     async fn test_dotter_dot_nothing() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
-        clear_cache()?;
+        clear_cache().await?;
 
         let called = Arc::new(AtomicUsize::new(0));
         let routes = {
@@ -852,61 +877,62 @@ mod tests {
         };
 
         starts_with_server!(addr, routes, {
-            spawn_blocking(move || {
-                let dotter = Dotter::new(
-                    Timeouts::default_http_client(),
-                    get_credential(),
-                    BUCKET_NAME.to_owned(),
-                    vec![],
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                assert!(dotter.inner.is_none());
-                dotter
-                    .dot(
-                        DotType::Http,
-                        ApiName::IoGetfile,
-                        true,
-                        Duration::from_millis(0),
-                    )
-                    .unwrap();
-                sleep(Duration::from_secs(5));
-                assert_eq!(called.load(Relaxed), 0);
+            let dotter = Dotter::new(
+                Timeouts::default_async_http_client(),
+                get_credential(),
+                BUCKET_NAME.to_owned(),
+                vec![],
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert!(dotter.inner.is_none());
+            dotter
+                .dot(
+                    DotType::Http,
+                    ApiName::IoGetfile,
+                    true,
+                    Duration::from_millis(0),
+                )
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(5)).await;
+            assert_eq!(called.load(Relaxed), 0);
 
-                let urls = vec!["http://".to_owned() + &addr.to_string()];
-                let dotter = Dotter::new(
-                    Timeouts::default_http_client(),
-                    get_credential(),
-                    BUCKET_NAME.to_owned(),
-                    urls,
-                    Some(Duration::from_millis(0)),
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
-                assert!(dotter.inner.is_some());
+            let urls = vec!["http://".to_owned() + &addr.to_string()];
+            let dotter = Dotter::new(
+                Timeouts::default_async_http_client(),
+                get_credential(),
+                BUCKET_NAME.to_owned(),
+                urls,
+                Some(Duration::from_millis(0)),
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+            assert!(dotter.inner.is_some());
 
-                let _guard = DottingDisableGuard::new();
-                dotter
-                    .dot(
-                        DotType::Http,
-                        ApiName::IoGetfile,
-                        true,
-                        Duration::from_millis(0),
-                    )
-                    .unwrap();
-                sleep(Duration::from_secs(5));
-                assert_eq!(called.load(Relaxed), 0);
-            })
-            .await?;
+            let _guard = DottingDisableGuard::new();
+            dotter
+                .dot(
+                    DotType::Http,
+                    ApiName::IoGetfile,
+                    true,
+                    Duration::from_millis(0),
+                )
+                .await
+                .unwrap();
+            sleep(Duration::from_secs(5)).await;
+            assert_eq!(called.load(Relaxed), 0);
         });
 
         Ok(())
@@ -915,7 +941,7 @@ mod tests {
     #[tokio::test]
     async fn test_dotter_dot_something() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
-        clear_cache()?;
+        clear_cache().await?;
         let records_map = Arc::new(DotRecordsDashMap::default());
 
         let routes = {
@@ -938,219 +964,242 @@ mod tests {
                 "http://".to_owned() + &addr.to_string() + "4",
                 "http://".to_owned() + &addr.to_string(),
             ];
-            spawn_blocking(move || {
-                let dotter = Dotter::new(
-                    Timeouts::default_http_client(),
-                    get_credential(),
-                    BUCKET_NAME.to_owned(),
-                    urls,
-                    Some(Duration::from_millis(0)),
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+            let dotter = Dotter::new(
+                Timeouts::default_async_http_client(),
+                get_credential(),
+                BUCKET_NAME.to_owned(),
+                urls,
+                Some(Duration::from_millis(0)),
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
 
-                let thread_pool = ThreadPoolBuilder::new().num_threads(10).build().unwrap();
-                thread_pool.scope(|s| {
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::IoGetfile,
-                                    true,
-                                    Duration::from_millis(10),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::IoGetfile,
-                                    false,
-                                    Duration::from_millis(12),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::UcV4Query,
-                                    true,
-                                    Duration::from_millis(14),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::UcV4Query,
-                                    true,
-                                    Duration::from_millis(16),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::UcV4Query,
-                                    false,
-                                    Duration::from_millis(18),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::IoGetfile,
-                                    true,
-                                    Duration::from_millis(20),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::IoGetfile,
-                                    true,
-                                    Duration::from_millis(22),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::IoGetfile,
-                                    false,
-                                    Duration::from_millis(24),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::UcV4Query,
-                                    true,
-                                    Duration::from_millis(26),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::UcV4Query,
-                                    true,
-                                    Duration::from_millis(28),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::UcV4Query,
-                                    false,
-                                    Duration::from_millis(30),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Http,
-                                    ApiName::UcV4Query,
-                                    true,
-                                    Duration::from_millis(32),
-                                )
-                                .unwrap();
-                        });
-                    }
-                });
-                sleep(Duration::from_secs(5));
-                {
-                    let record = records_map
-                        .get(&DotRecordKey::new(DotType::Sdk, ApiName::UcV4Query))
+            let mut tasks = Vec::new();
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::IoGetfile,
+                            true,
+                            Duration::from_millis(10),
+                        )
+                        .await
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(2));
-                    assert_eq!(record.failed_count(), Some(1));
-                    assert_eq!(record.success_avg_elapsed_duration_ms(), Some(15));
-                    assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(18));
-                }
-                {
-                    let record = records_map
-                        .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::IoGetfile,
+                            false,
+                            Duration::from_millis(12),
+                        )
+                        .await
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(1));
-                    assert_eq!(record.failed_count(), Some(1));
-                    assert_eq!(record.success_avg_elapsed_duration_ms(), Some(10));
-                    assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(12));
-                }
-                {
-                    let record = records_map
-                        .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(14),
+                        )
+                        .await
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(3));
-                    assert_eq!(record.failed_count(), Some(1));
-                    assert_eq!(record.success_avg_elapsed_duration_ms(), Some(28));
-                    assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(30));
-                }
-                {
-                    let record = records_map
-                        .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(16),
+                        )
+                        .await
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(2));
-                    assert_eq!(record.failed_count(), Some(1));
-                    assert_eq!(record.success_avg_elapsed_duration_ms(), Some(21));
-                    assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(24));
-                }
-            })
-            .await?;
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::UcV4Query,
+                            false,
+                            Duration::from_millis(18),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::IoGetfile,
+                            true,
+                            Duration::from_millis(20),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::IoGetfile,
+                            true,
+                            Duration::from_millis(22),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::IoGetfile,
+                            false,
+                            Duration::from_millis(24),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(26),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(28),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(28),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::UcV4Query,
+                            false,
+                            Duration::from_millis(30),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Http,
+                            ApiName::UcV4Query,
+                            true,
+                            Duration::from_millis(32),
+                        )
+                        .await
+                        .unwrap();
+                })
+            });
+            join_all(tasks).await;
+            sleep(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::UcV4Query))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(1));
+                assert_eq!(record.success_avg_elapsed_duration_ms(), Some(15));
+                assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(18));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(1));
+                assert_eq!(record.success_avg_elapsed_duration_ms(), Some(10));
+                assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(12));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(4));
+                assert_eq!(record.failed_count(), Some(1));
+                assert_eq!(record.success_avg_elapsed_duration_ms(), Some(28));
+                assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(30));
+            }
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(1));
+                assert_eq!(record.success_avg_elapsed_duration_ms(), Some(21));
+                assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(24));
+            }
         });
         Ok(())
     }
@@ -1158,7 +1207,7 @@ mod tests {
     #[tokio::test]
     async fn test_dotter_punish() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
-        clear_cache()?;
+        clear_cache().await?;
         let records_map = Arc::new(DotRecordsDashMap::default());
 
         let routes = {
@@ -1174,67 +1223,65 @@ mod tests {
         };
         starts_with_server!(addr, routes, {
             let urls = vec!["http://".to_owned() + &addr.to_string()];
-            spawn_blocking(move || {
-                let dotter = Dotter::new(
-                    Timeouts::default_http_client(),
-                    get_credential(),
-                    BUCKET_NAME.to_owned(),
-                    urls,
-                    Some(Duration::from_millis(0)),
-                    Some(1),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                );
+            let dotter = Dotter::new(
+                Timeouts::default_async_http_client(),
+                get_credential(),
+                BUCKET_NAME.to_owned(),
+                urls,
+                Some(Duration::from_millis(0)),
+                Some(1),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
 
-                let thread_pool = ThreadPoolBuilder::new().num_threads(10).build().unwrap();
-                thread_pool.scope(|s| {
-                    {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter
-                                .dot(
-                                    DotType::Sdk,
-                                    ApiName::IoGetfile,
-                                    true,
-                                    Duration::from_millis(10),
-                                )
-                                .unwrap();
-                        });
-                    }
-                    for _ in 0..5 {
-                        let dotter = dotter.to_owned();
-                        s.spawn(move |_| {
-                            dotter.punish().unwrap();
-                        });
-                    }
-                });
-                sleep(Duration::from_secs(5));
-                {
-                    let record = records_map
-                        .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+            let mut tasks = Vec::new();
+            tasks.push({
+                let dotter = dotter.to_owned();
+                spawn(async move {
+                    dotter
+                        .dot(
+                            DotType::Sdk,
+                            ApiName::IoGetfile,
+                            true,
+                            Duration::from_millis(10),
+                        )
+                        .await
                         .unwrap();
-                    assert_eq!(record.success_count(), Some(1));
-                    assert_eq!(record.failed_count(), Some(0));
-                    assert_eq!(record.success_avg_elapsed_duration_ms(), Some(10));
-                    assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(0));
-                }
-                {
-                    let record = records_map.get(&DotRecordKey::punished()).unwrap();
-                    assert_eq!(record.punished_count(), Some(5));
-                }
-            })
-            .await?;
+                })
+            });
+            for _ in 0..5 {
+                let dotter = dotter.to_owned();
+                tasks.push(spawn(async move {
+                    dotter.punish().await.unwrap();
+                }));
+            }
+
+            sleep(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(0));
+                assert_eq!(record.success_avg_elapsed_duration_ms(), Some(10));
+                assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(0));
+            }
+            {
+                let record = records_map.get(&DotRecordKey::punished()).unwrap();
+                assert_eq!(record.punished_count(), Some(5));
+            }
         });
         Ok(())
     }
 
-    fn clear_cache() -> IOResult<()> {
-        let cache_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
-        std::fs::remove_file(&cache_file_path).or_else(|err| {
-            if err.kind() == IOErrorKind::NotFound {
+    async fn clear_cache() -> IoResult<()> {
+        let cache_file_path = cache_dir_path_of(DOT_FILE_NAME).await?;
+        remove_file(&cache_file_path).await.or_else(|err| {
+            if err.kind() == IoErrorKind::NotFound {
                 Ok(())
             } else {
                 Err(err)

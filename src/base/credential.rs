@@ -1,4 +1,4 @@
-use hmac::{Hmac, Mac, NewMac};
+use hmac::{Hmac, Mac};
 use sha1::Sha1;
 
 use super::base64;
@@ -23,7 +23,6 @@ impl Credential {
         }
     }
 
-    #[inline]
     pub(crate) fn access_key(&self) -> &str {
         &self.access_key
     }
