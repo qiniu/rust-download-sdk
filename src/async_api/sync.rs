@@ -423,7 +423,7 @@ fn block_on<F: Future>(fut: F) -> F::Output {
 
     impl ArcWake for ThreadWaker {
         fn wake_by_ref(arc_self: &Arc<Self>) {
-            debug!("({:?}) unpark", current_thread().id());
+            debug!("({:?}) unpark by ({:?})", arc_self.0.id(), current_thread().id());
             arc_self.0.unpark();
         }
     }
