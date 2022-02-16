@@ -24,7 +24,7 @@ pub(crate) struct RangeReaderBuilder {
     pub(crate) dot_tries: Option<usize>,
     pub(crate) dot_interval: Option<Duration>,
     pub(crate) max_dot_buffer_size: Option<u64>,
-    pub(crate) max_retry_concurrency: Option<usize>,
+    pub(crate) max_retry_concurrency: Option<u32>,
 }
 
 impl RangeReaderBuilder {
@@ -144,7 +144,7 @@ impl RangeReaderBuilder {
         self
     }
 
-    pub(crate) fn max_retry_concurrency(mut self, max_retry_concurrency: usize) -> Self {
+    pub(crate) fn max_retry_concurrency(mut self, max_retry_concurrency: u32) -> Self {
         self.max_retry_concurrency = Some(max_retry_concurrency);
         self
     }

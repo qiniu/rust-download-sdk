@@ -142,7 +142,7 @@ impl RangeReaderBuilder {
     }
 
     /// 设置最大并行重试次数，如果设置为 0 则表示禁止并行重试功能
-    pub fn max_retry_concurrency(self, max_retry_concurrency: usize) -> Self {
+    pub fn max_retry_concurrency(self, max_retry_concurrency: u32) -> Self {
         self.with_inner(|b| b.max_retry_concurrency(max_retry_concurrency))
     }
 

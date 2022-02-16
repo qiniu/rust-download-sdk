@@ -20,14 +20,14 @@ use tokio::{pin, sync::RwLock, time::sleep_until, time::Instant};
 #[derive(Debug, Clone)]
 pub(super) struct AsyncRangeReaderWithRangeReader {
     inner: AsyncRangeReader,
-    max_retry_concurrency: usize,
+    max_retry_concurrency: u32,
     total_tries: usize,
 }
 
 impl AsyncRangeReaderWithRangeReader {
     pub(super) fn new(
         range_reader: AsyncRangeReader,
-        max_retry_concurrency: usize,
+        max_retry_concurrency: u32,
         total_tries: usize,
     ) -> Self {
         Self {
@@ -209,10 +209,10 @@ impl<T> From<TryResult<T>> for IoResult<T> {
 async fn try_with_timeout<
     Output,
     T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
-    F: Fn(usize) -> T,
+    F: Fn(u32) -> T,
 >(
     f: F,
-    max: usize,
+    max: u32,
 ) -> TryResult<Output> {
     struct FutWithIdx<
         Output,
@@ -246,14 +246,15 @@ async fn try_with_timeout<
     }
 
     let last_fut = FutWithIdx { fut: f(0), idx: 0 };
-    let mut last_base_timeout = last_fut.base_timeout().await;
+    let last_base_timeout = last_fut.base_timeout().await;
     let mut all_futures = vec![last_fut];
     let mut last_error = None;
 
     'timeout_loop: for i in 0..max {
         let last_try = i >= max - 1;
-        let until = Instant::now() + last_base_timeout;
-        info!("{{{}}} Timeout-try ({:?})", i, last_base_timeout);
+        let mut fut_timeout = future_timeout(last_base_timeout, i);
+        let until = Instant::now() + fut_timeout;
+        info!("{{{}}} Timeout-try ({:?})", i, fut_timeout);
         loop {
             let timeout = sleep_until(until);
             pin!(timeout);
@@ -262,16 +263,16 @@ async fn try_with_timeout<
                     if last_try {
                         info!(
                             "{{{}}} Try timed out ({:?}), this is the last try",
-                            i, last_base_timeout
+                            i, fut_timeout
                         );
                         break 'timeout_loop;
                     } else {
                         info!(
                             "{{{}}} Try timed out ({:?}), spawn new async task",
-                            i, last_base_timeout
+                            i, fut_timeout
                         );
                         let last_fut = f(i + 1);
-                        last_base_timeout = last_fut.base_timeout().await;
+                        fut_timeout = future_timeout(last_fut.base_timeout().await, i + 1);
                         all_futures = futs.into_inner();
                         all_futures.push(FutWithIdx {
                             fut: last_fut,
@@ -332,6 +333,10 @@ async fn try_with_timeout<
     }
 }
 
+fn future_timeout(last_base_timeout: Duration, index: u32) -> Duration {
+    last_base_timeout * 2u32.pow(index)
+}
+
 struct SelectedHostInfoInner {
     host_info: HostInfo,
     selected_at: Instant,
@@ -382,7 +387,7 @@ impl<'a> RangeReaderReadAtRetrier<'a> {
         pos: u64,
         size: u64,
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -433,7 +438,7 @@ impl<'a> RangeReaderReadMultiRangesRetrier<'a> {
     fn new(
         ranges: &'a [(u64, u64)],
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -482,7 +487,7 @@ struct RangeReaderExistRetrier<'a>(RangeReaderRetrier<'a, bool>);
 impl<'a> RangeReaderExistRetrier<'a> {
     fn new(
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -530,7 +535,7 @@ struct RangeReaderFileSizeRetrier<'a>(RangeReaderRetrier<'a, u64>);
 impl<'a> RangeReaderFileSizeRetrier<'a> {
     fn new(
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -578,7 +583,7 @@ struct RangeReaderDownloadRetrier<'a>(RangeReaderRetrier<'a, Vec<u8>>);
 impl<'a> RangeReaderDownloadRetrier<'a> {
     fn new(
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -627,7 +632,7 @@ impl<'a> RangeReaderReadLastBytesRetrier<'a> {
     fn new(
         size: u64,
         key: &'a str,
-        async_task_id: usize,
+        async_task_id: u32,
         range_reader: &'a AsyncRangeReader,
         tries_info: TriesInfo<'a>,
         trying_hosts: &'a TryingHosts,
@@ -682,7 +687,7 @@ async fn set_selected_info(selected_info: &SelectedHostInfo, host: HostInfo) {
 mod tests {
     use super::*;
     use futures::ready;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
     use tokio::time::{sleep, Sleep};
 
     struct FakedRetrier<T> {
@@ -730,7 +735,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_try_with_timeout() -> anyhow::Result<()> {
-        let counter = Arc::new(AtomicUsize::new(0));
+        env_logger::try_init().ok();
+
+        let counter = Arc::new(AtomicU32::new(0));
         let retrier_punished_1 = Arc::new(AtomicBool::new(false));
         let retrier_punished_2 = Arc::new(AtomicBool::new(false));
         let result = {
@@ -810,11 +817,11 @@ mod tests {
         let result = {
             try_with_timeout(
                 move |count| {
-                    assert!(count < 5);
+                    assert!(count < 2);
                     FakedRetrier::new(
                         Duration::from_millis(1000),
                         Result3::Ok(count),
-                        Duration::from_millis(6000),
+                        Duration::from_millis(4000),
                         Arc::new(AtomicBool::new(false)),
                     )
                 },

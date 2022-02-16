@@ -264,43 +264,6 @@ struct AsyncRangeReaderInner {
 }
 
 impl AsyncRangeReader {
-    // pub(super) fn from_env_with_extra_items(
-    //     key: String,
-    // ) -> Option<(Self, String, Option<usize>, Option<usize>)> {
-    //     with_current_qiniu_config(|config| {
-    //         config.and_then(|config| {
-    //             config.with_key(&key.to_owned(), |config| {
-    //                 let config = Arc::new(config.to_owned());
-    //                 let range_reader_config = config.to_owned();
-    //                 (
-    //                     config.max_retry_concurrency(),
-    //                     config.retry(),
-    //                     Box::pin(async move {
-    //                         config
-    //                             .get_or_init_async_range_reader_inner(move || async move {
-    //                                 AsyncRangeReaderBuilder::from_config(
-    //                                     String::new(),
-    //                                     &range_reader_config,
-    //                                 )
-    //                                 .build_inner()
-    //                                 .await
-    //                             })
-    //                             .await
-    //                     }),
-    //                 )
-    //             })
-    //         })
-    //     })
-    //     .map(|(max_retry_concurrency, total_tries, fut)| {
-    //         (
-    //             Self(Arc::new(AsyncLazy::new(fut))),
-    //             key,
-    //             max_retry_concurrency,
-    //             total_tries,
-    //         )
-    //     })
-    // }
-
     pub(super) async fn update_urls(&self) -> bool {
         self.inner().await.io_selector.update_hosts().await
     }
@@ -342,7 +305,7 @@ impl AsyncRangeReader {
         pos: u64,
         size: u64,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -422,7 +385,7 @@ impl AsyncRangeReader {
         &self,
         ranges: &[(u64, u64)],
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -554,7 +517,7 @@ impl AsyncRangeReader {
     pub(super) async fn exist<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -614,7 +577,7 @@ impl AsyncRangeReader {
     pub(super) async fn file_size<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -676,7 +639,7 @@ impl AsyncRangeReader {
     pub(super) async fn download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         mut on_host_selected: F,
@@ -716,7 +679,7 @@ impl AsyncRangeReader {
     async fn _download<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
         &self,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         init_from: u64,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
@@ -818,7 +781,7 @@ impl AsyncRangeReader {
         &self,
         size: u64,
         key: &str,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         on_host_selected: F,
@@ -897,7 +860,7 @@ impl AsyncRangeReader {
         key: &str,
         method: Method,
         api_name: ApiName,
-        async_task_id: usize,
+        async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
         mut on_host_selected: F2,
