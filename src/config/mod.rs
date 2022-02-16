@@ -13,11 +13,7 @@ pub use multi_clusters::{
 };
 pub use single_cluster::{Config, ConfigBuilder, SingleClusterConfig, SingleClusterConfigBuilder};
 
-use super::{
-    async_api::AsyncRangeReaderBuilder,
-    base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
-    sync_api::RangeReaderBuilder,
-};
+use super::base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder};
 use log::{error, info, warn};
 use static_vars::qiniu_config;
 use std::{env, fs, sync::RwLock, time::Duration};
@@ -168,7 +164,7 @@ pub enum ClustersConfigParseError {
     TOMLError(#[from] toml::de::Error),
 }
 
-pub(super) fn build_base_range_reader_builder_from_config(
+pub(super) fn build_range_reader_builder_from_config(
     key: String,
     config: &Config,
 ) -> BaseRangeReaderBuilder {
@@ -243,14 +239,7 @@ pub(super) fn build_base_range_reader_builder_from_config(
     builder
 }
 
-pub(super) fn build_range_reader_builder_from_config(
-    key: String,
-    config: &Config,
-) -> RangeReaderBuilder {
-    build_base_range_reader_builder_from_config(key, config).into()
-}
-
-pub(super) fn build_base_range_reader_builder_from_env(
+pub(super) fn build_range_reader_builder_from_env(
     key: String,
     only_single_cluster: bool,
 ) -> Option<BaseRangeReaderBuilder> {
@@ -260,17 +249,10 @@ pub(super) fn build_base_range_reader_builder_from_env(
                 return None;
             }
             config.with_key(&key.to_owned(), move |config| {
-                build_base_range_reader_builder_from_config(key, config)
+                build_range_reader_builder_from_config(key, config)
             })
         })
     })
-}
-
-pub(super) fn build_async_range_reader_builder_from_config(
-    key: String,
-    config: &Config,
-) -> AsyncRangeReaderBuilder {
-    build_base_range_reader_builder_from_config(key, config).into()
 }
 
 #[cfg(test)]

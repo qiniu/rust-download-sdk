@@ -621,22 +621,22 @@ pub(super) enum PunishResult {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HostInfo {
+pub(super) struct HostInfo {
     host: String,
     timeout_power: usize,
     timeout: Duration,
 }
 
 impl HostInfo {
-    pub(crate) fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         &self.host
     }
 
-    pub(crate) fn timeout_power(&self) -> usize {
+    pub(super) fn timeout_power(&self) -> usize {
         self.timeout_power
     }
 
-    pub(crate) fn timeout(&self) -> Duration {
+    pub(super) fn timeout(&self) -> Duration {
         self.timeout
     }
 }

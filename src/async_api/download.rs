@@ -3,7 +3,7 @@
 use super::{
     super::{
         base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
-        config::{build_async_range_reader_builder_from_config, Config, Timeouts},
+        config::{build_range_reader_builder_from_config, Config, Timeouts},
     },
     dot::{ApiName, DotType, Dotter},
     host_selector::{HostInfo, HostSelector, HostSelectorBuilder},
@@ -87,7 +87,7 @@ pub fn sign_download_url_with_lifetime(
 }
 
 #[derive(Debug)]
-pub(crate) struct AsyncRangeReaderBuilder(BaseRangeReaderBuilder);
+pub(super) struct AsyncRangeReaderBuilder(BaseRangeReaderBuilder);
 
 impl From<BaseRangeReaderBuilder> for AsyncRangeReaderBuilder {
     fn from(builder: BaseRangeReaderBuilder) -> Self {
@@ -102,11 +102,11 @@ impl From<AsyncRangeReaderBuilder> for BaseRangeReaderBuilder {
 }
 
 impl AsyncRangeReaderBuilder {
-    pub(crate) fn take_key(&mut self) -> String {
+    pub(super) fn take_key(&mut self) -> String {
         take(&mut self.0.key)
     }
 
-    pub(crate) fn build(self) -> AsyncRangeReader {
+    pub(super) fn build(self) -> AsyncRangeReader {
         AsyncRangeReader(Arc::new(AsyncLazy::new(Box::pin(async move {
             self.build_inner().await
         }))))
@@ -243,12 +243,12 @@ impl AsyncRangeReaderBuilder {
     }
 
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
-        build_async_range_reader_builder_from_config(key, config)
+        build_range_reader_builder_from_config(key, config).into()
     }
 }
 
 #[derive(Clone)]
-pub(crate) struct AsyncRangeReader(Arc<AsyncLazy<Arc<AsyncRangeReaderInner>>>);
+pub(super) struct AsyncRangeReader(Arc<AsyncLazy<Arc<AsyncRangeReaderInner>>>);
 
 #[derive(Debug)]
 struct AsyncRangeReaderInner {
