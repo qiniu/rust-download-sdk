@@ -252,7 +252,7 @@ async fn try_with_timeout<
 
     'timeout_loop: for i in 0..max {
         let last_try = i >= max - 1;
-        let mut fut_timeout = future_timeout(last_base_timeout, i);
+        let fut_timeout = future_timeout(last_base_timeout, i);
         let until = Instant::now() + fut_timeout;
         info!("{{{}}} Timeout-try ({:?})", i, fut_timeout);
         loop {
@@ -272,7 +272,6 @@ async fn try_with_timeout<
                             i, fut_timeout
                         );
                         let last_fut = f(i + 1);
-                        fut_timeout = future_timeout(last_fut.base_timeout().await, i + 1);
                         all_futures = futs.into_inner();
                         all_futures.push(FutWithIdx {
                             fut: last_fut,
