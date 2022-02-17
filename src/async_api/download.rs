@@ -264,6 +264,20 @@ struct AsyncRangeReaderInner {
 }
 
 impl AsyncRangeReader {
+    pub(super) async fn dot(
+        &self,
+        dot_type: DotType,
+        api_name: ApiName,
+        successful: bool,
+        elapsed_duration: Duration,
+    ) -> IoResult<()> {
+        let inner = self.0.get().await;
+        inner
+            .dotter
+            .dot(dot_type, api_name, successful, elapsed_duration)
+            .await
+    }
+
     pub(super) async fn update_urls(&self) -> bool {
         self.inner().await.io_selector.update_hosts().await
     }
@@ -316,7 +330,6 @@ impl AsyncRangeReader {
         return self.with_retries(
             key,
             Method::GET,
-            ApiName::RangeReaderReadAt,
             async_task_id,
             tries_info,
             trying_hosts,
@@ -394,7 +407,6 @@ impl AsyncRangeReader {
             .with_retries(
                 key,
                 Method::GET,
-                ApiName::RangeReaderReadAt,
                 async_task_id,
                 tries_info,
                 trying_hosts,
@@ -525,7 +537,6 @@ impl AsyncRangeReader {
         self.with_retries(
             key,
             Method::HEAD,
-            ApiName::RangeReaderExist,
             async_task_id,
             tries_info,
             trying_hosts,
@@ -585,7 +596,6 @@ impl AsyncRangeReader {
         self.with_retries(
             key,
             Method::HEAD,
-            ApiName::RangeReaderFileSize,
             async_task_id,
             tries_info,
             trying_hosts,
@@ -691,7 +701,6 @@ impl AsyncRangeReader {
             .with_retries(
                 key,
                 Method::GET,
-                ApiName::RangeReaderDownloadTo,
                 async_task_id,
                 tries_info,
                 trying_hosts,
@@ -789,7 +798,6 @@ impl AsyncRangeReader {
         return self.with_retries(
             key,
             Method::GET,
-            ApiName::RangeReaderReadLastBytes,
             async_task_id,
             tries_info,
             trying_hosts,
@@ -859,7 +867,6 @@ impl AsyncRangeReader {
         &self,
         key: &str,
         method: Method,
-        api_name: ApiName,
         async_task_id: u32,
         tries_info: TriesInfo<'_>,
         trying_hosts: &TryingHosts,
@@ -867,7 +874,6 @@ impl AsyncRangeReader {
         mut for_each_url: F,
     ) -> IoResult3<T> {
         let begin_at = SystemTime::now();
-        let begin_at_instant = Instant::now();
         let mut last_error: Option<IoError> = None;
         let inner = self.inner().await;
 
@@ -876,7 +882,6 @@ impl AsyncRangeReader {
             if tries >= tries_info.total_tries {
                 return IoResult3::NoMoreTries(last_error);
             }
-            let last_try = tries_info.total_tries - tries <= 1;
 
             let chosen_io_info = {
                 let mut guard = trying_hosts.lock().await;
@@ -928,11 +933,6 @@ impl AsyncRangeReader {
                     inner.io_selector.reward(chosen_io_info.host()).await;
                     inner
                         .dotter
-                        .dot(DotType::Sdk, api_name, true, begin_at_instant.elapsed())
-                        .await
-                        .ok();
-                    inner
-                        .dotter
                         .dot(
                             DotType::Http,
                             ApiName::IoGetfile,
@@ -958,15 +958,10 @@ impl AsyncRangeReader {
                         )
                         .await
                         .ok();
-                    if !punished || last_try {
-                        inner
-                            .dotter
-                            .dot(DotType::Sdk, api_name, false, begin_at_instant.elapsed())
-                            .await
-                            .ok();
-                        return Err(err).into();
-                    } else {
+                    if punished {
                         last_error = Some(err);
+                    } else {
+                        return Err(err).into();
                     }
                 }
             }
@@ -1403,13 +1398,6 @@ mod tests {
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(0));
             }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(2));
-                assert_eq!(record.failed_count(), Some(0));
-            }
         });
         Ok(())
     }
@@ -1462,7 +1450,7 @@ mod tests {
                 )
                 .await
             {
-                Result3::Err(..) => {}
+                Result3::NoMoreTries(..) => {}
                 _ => unreachable!(),
             }
             assert_eq!(io_called.load(Relaxed), 3);
@@ -1474,13 +1462,6 @@ mod tests {
                     .unwrap();
                 assert_eq!(record.success_count(), Some(0));
                 assert_eq!(record.failed_count(), Some(3));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(0));
-                assert_eq!(record.failed_count(), Some(1));
             }
         });
         Ok(())
@@ -1547,13 +1528,6 @@ mod tests {
                 assert_eq!(record.success_count(), Some(0));
                 assert_eq!(record.failed_count(), Some(1));
             }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderReadAt))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(0));
-                assert_eq!(record.failed_count(), Some(1));
-            }
         });
         Ok(())
     }
@@ -1616,16 +1590,6 @@ mod tests {
             {
                 let record = records_map
                     .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(1));
-                assert_eq!(record.failed_count(), Some(0));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(
-                        DotType::Sdk,
-                        ApiName::RangeReaderReadLastBytes,
-                    ))
                     .unwrap();
                 assert_eq!(record.success_count(), Some(1));
                 assert_eq!(record.failed_count(), Some(0));
@@ -1716,33 +1680,6 @@ mod tests {
                 assert_eq!(record.success_count(), Some(3));
                 assert_eq!(record.failed_count(), Some(0));
             }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderExist))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(1));
-                assert_eq!(record.failed_count(), Some(0));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(
-                        DotType::Sdk,
-                        ApiName::RangeReaderFileSize,
-                    ))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(1));
-                assert_eq!(record.failed_count(), Some(0));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(
-                        DotType::Sdk,
-                        ApiName::RangeReaderDownloadTo,
-                    ))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(1));
-                assert_eq!(record.failed_count(), Some(0));
-            }
         });
         Ok(())
     }
@@ -1791,7 +1728,7 @@ mod tests {
                 )
                 .await
             {
-                Result3::Err(_) => {}
+                Result3::NoMoreTries(_) => {}
                 _ => unreachable!(),
             }
 
@@ -1806,7 +1743,7 @@ mod tests {
                 )
                 .await
             {
-                Result3::Err(_) => {}
+                Result3::NoMoreTries(_) => {}
                 _ => unreachable!(),
             }
 
@@ -1821,40 +1758,13 @@ mod tests {
                 )
                 .await
             {
-                Result3::Err(_) => {}
+                Result3::NoMoreTries(_) => {}
                 _ => unreachable!(),
             }
 
             assert_eq!(counter.load(Relaxed), 3 * 3);
 
             sleep(Duration::from_secs(5)).await;
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(
-                        DotType::Sdk,
-                        ApiName::RangeReaderFileSize,
-                    ))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(0));
-                assert_eq!(record.failed_count(), Some(1));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::RangeReaderExist))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(0));
-                assert_eq!(record.failed_count(), Some(1));
-            }
-            {
-                let record = records_map
-                    .get(&DotRecordKey::new(
-                        DotType::Sdk,
-                        ApiName::RangeReaderDownloadTo,
-                    ))
-                    .unwrap();
-                assert_eq!(record.success_count(), Some(0));
-                assert_eq!(record.failed_count(), Some(1));
-            }
             {
                 let record = records_map
                     .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
@@ -2207,7 +2117,7 @@ mod tests {
                     )
                     .await
                 {
-                    Result3::Err(..) => {}
+                    Result3::NoMoreTries(..) => {}
                     _ => unreachable!(),
                 }
                 assert_eq!(c.load(Relaxed), 3);
@@ -2241,7 +2151,7 @@ mod tests {
                     )
                     .await
                 {
-                    Result3::Err(..) => {}
+                    Result3::NoMoreTries(..) => {}
                     _ => unreachable!(),
                 }
                 assert_eq!(c.load(Relaxed), 6);

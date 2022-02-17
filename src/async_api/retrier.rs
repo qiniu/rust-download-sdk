@@ -1,4 +1,5 @@
 use super::{
+    dot::{ApiName, DotType},
     download::{AsyncRangeReader, IoResult3, Result3, TriesInfo, TryingHosts},
     host_selector::HostInfo,
     RangePart,
@@ -49,23 +50,19 @@ impl AsyncRangeReaderWithRangeReader {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderReadAtRetrier::new(
-                    pos,
-                    size,
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderReadAt, |async_task_id| {
+            RangeReaderReadAtRetrier::new(
+                pos,
+                size,
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
     }
 
     pub(super) async fn read_multi_ranges(
@@ -76,107 +73,243 @@ impl AsyncRangeReaderWithRangeReader {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderReadMultiRangesRetrier::new(
-                    ranges,
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderReadMultiRanges, |async_task_id| {
+            RangeReaderReadMultiRangesRetrier::new(
+                ranges,
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
     }
 
     pub(super) async fn exist(&self, key: &str) -> IoResult<bool> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderExistRetrier::new(
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderExist, |async_task_id| {
+            RangeReaderExistRetrier::new(
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
     }
 
     pub(super) async fn file_size(&self, key: &str) -> IoResult<u64> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderFileSizeRetrier::new(
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderFileSize, |async_task_id| {
+            RangeReaderFileSizeRetrier::new(
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
     }
 
     pub(super) async fn download(&self, key: &str) -> IoResult<Vec<u8>> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderDownloadRetrier::new(
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderDownloadTo, |async_task_id| {
+            RangeReaderDownloadRetrier::new(
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
     }
 
     pub(super) async fn read_last_bytes(&self, key: &str, size: u64) -> IoResult<(Vec<u8>, u64)> {
         let have_tried: AtomicUsize = Default::default();
         let trying_hosts: TryingHosts = Default::default();
         let selected_info: SelectedHostInfo = Default::default();
-        try_with_timeout(
-            |async_task_id| {
-                RangeReaderReadLastBytesRetrier::new(
-                    size,
-                    key,
-                    async_task_id,
-                    &self.inner,
-                    TriesInfo::new(&have_tried, self.total_tries),
-                    &trying_hosts,
-                    &selected_info,
-                )
-            },
-            self.max_retry_concurrency,
-        )
+        self.try_with_timeout(ApiName::RangeReaderReadLastBytes, |async_task_id| {
+            RangeReaderReadLastBytesRetrier::new(
+                size,
+                key,
+                async_task_id,
+                &self.inner,
+                TriesInfo::new(&have_tried, self.total_tries),
+                &trying_hosts,
+                &selected_info,
+            )
+        })
         .await
-        .into()
+    }
+
+    async fn try_with_timeout<
+        Output,
+        T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
+        F: Fn(u32) -> T,
+    >(
+        &self,
+        api_name: ApiName,
+        f: F,
+    ) -> IoResult<Output> {
+        let begin_at = Instant::now();
+        let result = _try_with_timeout(f, self.max_retry_concurrency).await;
+        self.inner
+            .dot(
+                DotType::Sdk,
+                api_name,
+                matches!(result, TryResult::Success(_)),
+                begin_at.elapsed(),
+            )
+            .await
+            .ok();
+        return result.into();
+
+        async fn _try_with_timeout<
+            Output,
+            T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
+            F: Fn(u32) -> T,
+        >(
+            f: F,
+            max: u32,
+        ) -> TryResult<Output> {
+            struct FutWithIdx<
+                Output,
+                T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
+            > {
+                idx: usize,
+                fut: T,
+            }
+
+            impl<
+                    Output,
+                    T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
+                > Future for FutWithIdx<Output, T>
+            {
+                type Output = IoResult3<Output>;
+
+                fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+                    Pin::new(&mut self.fut).poll(cx)
+                }
+            }
+
+            #[async_trait]
+            impl<
+                    Output,
+                    T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
+                > MaybeTimeout for FutWithIdx<Output, T>
+            {
+                async fn base_timeout(&self) -> Duration {
+                    self.fut.base_timeout().await
+                }
+
+                async fn increase_timeout_power_if_timed_out(self) {
+                    self.fut.increase_timeout_power_if_timed_out().await
+                }
+            }
+
+            let last_fut = FutWithIdx { fut: f(0), idx: 0 };
+            let last_base_timeout = last_fut.base_timeout().await;
+            let mut all_futures = vec![last_fut];
+            let mut last_error = None;
+
+            'timeout_loop: for i in 0..max {
+                let last_try = i >= max - 1;
+                let fut_timeout = future_timeout(last_base_timeout, i);
+                let until = Instant::now() + fut_timeout;
+                info!("{{{}}} Timeout-try ({:?})", i, fut_timeout);
+                loop {
+                    let timeout = sleep_until(until);
+                    pin!(timeout);
+                    match select(timeout, select_all(take(&mut all_futures))).await {
+                        Either::Left((_, futs)) => {
+                            if last_try {
+                                info!(
+                                    "{{{}}} Try timed out ({:?}), this is the last try",
+                                    i, fut_timeout
+                                );
+                                break 'timeout_loop;
+                            } else {
+                                info!(
+                                    "{{{}}} Try timed out ({:?}), spawn new async task",
+                                    i, fut_timeout
+                                );
+                                let last_fut = f(i + 1);
+                                all_futures = futs.into_inner();
+                                all_futures.push(FutWithIdx {
+                                    fut: last_fut,
+                                    idx: all_futures.len() + 1,
+                                });
+                                continue 'timeout_loop;
+                            }
+                        }
+                        Either::Right(((got_result, idx, rest_futures), _)) => match got_result {
+                            Result3::Ok(output) => {
+                                info!("{{{}/{}}} Try succeed", idx, i);
+                                punish_all_timed_out_futures(
+                                    rest_futures.into_iter().filter(|f| f.idx < idx),
+                                )
+                                .await;
+                                return TryResult::Success(output);
+                            }
+                            Result3::Err(err) => {
+                                info!("{{{}/{}}} Try error: {:?}", idx, i, err);
+                                punish_all_timed_out_futures(
+                                    rest_futures.into_iter().filter(|f| f.idx < idx),
+                                )
+                                .await;
+                                return TryResult::Error(err);
+                            }
+                            Result3::NoMoreTries(maybe_err) => {
+                                info!(
+                            "{{{}/{}}} No more tries: {:?}, will wait for the other async tasks",
+                            idx, i, maybe_err
+                        );
+                                if last_error.is_none() {
+                                    last_error = maybe_err;
+                                }
+                                all_futures = rest_futures;
+                            }
+                        },
+                    }
+                }
+            }
+
+            error!("All {} async tasks are timed out", max);
+            punish_all_timed_out_futures(take(&mut all_futures)).await;
+
+            return if let Some(err) = last_error {
+                TryResult::Error(err)
+            } else {
+                TryResult::AllTimedOut
+            };
+
+            async fn punish_all_timed_out_futures<
+                I: IntoIterator<Item = Item>,
+                Item: MaybeTimeout,
+            >(
+                iter: I,
+            ) {
+                join_all(
+                    iter.into_iter()
+                        .map(|fut| async move { fut.increase_timeout_power_if_timed_out().await }),
+                )
+                .await;
+            }
+        }
     }
 }
 
@@ -203,132 +336,6 @@ impl<T> From<TryResult<T>> for IoResult<T> {
                 "All concurrency requests are timed out",
             )),
         }
-    }
-}
-
-async fn try_with_timeout<
-    Output,
-    T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
-    F: Fn(u32) -> T,
->(
-    f: F,
-    max: u32,
-) -> TryResult<Output> {
-    struct FutWithIdx<
-        Output,
-        T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync,
-    > {
-        idx: usize,
-        fut: T,
-    }
-
-    impl<Output, T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync> Future
-        for FutWithIdx<Output, T>
-    {
-        type Output = IoResult3<Output>;
-
-        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-            Pin::new(&mut self.fut).poll(cx)
-        }
-    }
-
-    #[async_trait]
-    impl<Output, T: Future<Output = IoResult3<Output>> + MaybeTimeout + Unpin + Send + Sync>
-        MaybeTimeout for FutWithIdx<Output, T>
-    {
-        async fn base_timeout(&self) -> Duration {
-            self.fut.base_timeout().await
-        }
-
-        async fn increase_timeout_power_if_timed_out(self) {
-            self.fut.increase_timeout_power_if_timed_out().await
-        }
-    }
-
-    let last_fut = FutWithIdx { fut: f(0), idx: 0 };
-    let last_base_timeout = last_fut.base_timeout().await;
-    let mut all_futures = vec![last_fut];
-    let mut last_error = None;
-
-    'timeout_loop: for i in 0..max {
-        let last_try = i >= max - 1;
-        let fut_timeout = future_timeout(last_base_timeout, i);
-        let until = Instant::now() + fut_timeout;
-        info!("{{{}}} Timeout-try ({:?})", i, fut_timeout);
-        loop {
-            let timeout = sleep_until(until);
-            pin!(timeout);
-            match select(timeout, select_all(take(&mut all_futures))).await {
-                Either::Left((_, futs)) => {
-                    if last_try {
-                        info!(
-                            "{{{}}} Try timed out ({:?}), this is the last try",
-                            i, fut_timeout
-                        );
-                        break 'timeout_loop;
-                    } else {
-                        info!(
-                            "{{{}}} Try timed out ({:?}), spawn new async task",
-                            i, fut_timeout
-                        );
-                        let last_fut = f(i + 1);
-                        all_futures = futs.into_inner();
-                        all_futures.push(FutWithIdx {
-                            fut: last_fut,
-                            idx: all_futures.len() + 1,
-                        });
-                        continue 'timeout_loop;
-                    }
-                }
-                Either::Right(((got_result, idx, rest_futures), _)) => match got_result {
-                    Result3::Ok(output) => {
-                        info!("{{{}/{}}} Try succeed", idx, i);
-                        punish_all_timed_out_futures(
-                            rest_futures.into_iter().filter(|f| f.idx < idx),
-                        )
-                        .await;
-                        return TryResult::Success(output);
-                    }
-                    Result3::Err(err) => {
-                        info!("{{{}/{}}} Try error: {:?}", idx, i, err);
-                        punish_all_timed_out_futures(
-                            rest_futures.into_iter().filter(|f| f.idx < idx),
-                        )
-                        .await;
-                        return TryResult::Error(err);
-                    }
-                    Result3::NoMoreTries(maybe_err) => {
-                        info!(
-                            "{{{}/{}}} No more tries: {:?}, will wait for the other async tasks",
-                            idx, i, maybe_err
-                        );
-                        if last_error.is_none() {
-                            last_error = maybe_err;
-                        }
-                        all_futures = rest_futures;
-                    }
-                },
-            }
-        }
-    }
-
-    error!("All {} async tasks are timed out", max);
-    punish_all_timed_out_futures(take(&mut all_futures)).await;
-
-    return if let Some(err) = last_error {
-        TryResult::Error(err)
-    } else {
-        TryResult::AllTimedOut
-    };
-
-    async fn punish_all_timed_out_futures<I: IntoIterator<Item = Item>, Item: MaybeTimeout>(
-        iter: I,
-    ) {
-        join_all(
-            iter.into_iter()
-                .map(|fut| async move { fut.increase_timeout_power_if_timed_out().await }),
-        )
-        .await;
     }
 }
 
@@ -684,10 +691,25 @@ async fn set_selected_info(selected_info: &SelectedHostInfo, host: HostInfo) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use futures::ready;
+    use super::{
+        super::{
+            cache_dir::cache_dir_path_of,
+            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
+            download::AsyncRangeReaderBuilder,
+        },
+        *,
+    };
+    use crate::{base::download::RangeReaderBuilder as BaseRangeReaderBuilder, Credential};
+    use futures::{channel::oneshot::channel, ready};
+    use hyper::Body;
+    use reqwest::header::{HeaderValue, AUTHORIZATION};
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
-    use tokio::time::{sleep, Sleep};
+    use tokio::{
+        fs::remove_file,
+        spawn,
+        time::{sleep, Sleep},
+    };
+    use warp::{path, reply::Response, Filter};
 
     struct FakedRetrier<T> {
         base_timeout: Duration,
@@ -732,19 +754,79 @@ mod tests {
         }
     }
 
+    macro_rules! starts_with_server {
+        ($io_addr:ident, $monitor_addr:ident, $io_routes:ident, $records_map:ident, $code:block) => {{
+            let (io_tx, io_rx) = channel();
+            let (monitor_tx, monitor_rx) = channel();
+            let ($io_addr, io_server) = warp::serve($io_routes).bind_with_graceful_shutdown(
+                ([127, 0, 0, 1], 0),
+                async move {
+                    io_rx.await.unwrap();
+                },
+            );
+            let $records_map = Arc::new(DotRecordsDashMap::default());
+            let monitor_routes = {
+                let records_map = $records_map.to_owned();
+                path!("v1" / "stat")
+                    .and(warp::header::value(AUTHORIZATION.as_str()))
+                    .and(warp::body::json())
+                    .map(move |authorization: HeaderValue, records: DotRecords| {
+                        assert!(authorization.to_str().unwrap().starts_with("UpToken "));
+                        records_map.merge_with_records(records);
+                        Response::new(Body::empty())
+                    })
+            };
+            let ($monitor_addr, monitor_server) = warp::serve(monitor_routes)
+                .bind_with_graceful_shutdown(([127, 0, 0, 1], 0), async move {
+                    monitor_rx.await.unwrap();
+                });
+            spawn(io_server);
+            spawn(monitor_server);
+            sleep(Duration::from_secs(1)).await;
+            $code;
+            io_tx.send(()).unwrap();
+            monitor_tx.send(()).unwrap();
+        }};
+    }
+
     #[tokio::test]
     async fn test_try_with_timeout() -> anyhow::Result<()> {
         env_logger::try_init().ok();
+        clear_cache().await?;
 
-        let counter = Arc::new(AtomicU32::new(0));
-        let retrier_punished_1 = Arc::new(AtomicBool::new(false));
-        let retrier_punished_2 = Arc::new(AtomicBool::new(false));
-        let result = {
-            let counter = counter.to_owned();
-            let retrier_punished_1 = retrier_punished_1.to_owned();
-            let retrier_punished_2 = retrier_punished_2.to_owned();
-            try_with_timeout(
-                move |count| {
+        let io_routes = path!("file").map(|| {
+            Response::new("1234567890".into())
+        });
+
+        starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
+            let io_urls = vec![format!("http://{}", io_addr)];
+            let downloader = AsyncRangeReaderWithRangeReader::new(
+                AsyncRangeReaderBuilder::from(
+                    BaseRangeReaderBuilder::new(
+                        "bucket".to_owned(),
+                        "file".to_owned(),
+                        get_credential(),
+                        io_urls,
+                    )
+                    .use_getfile_api(false)
+                    .normalize_key(true)
+                    .monitor_urls(vec!["http://".to_owned() + &monitor_addr.to_string()])
+                    .dot_interval(Duration::from_millis(0))
+                    .max_dot_buffer_size(1),
+                )
+                .build(),
+                2,
+                0,
+            );
+
+            let counter = Arc::new(AtomicU32::new(0));
+            let retrier_punished_1 = Arc::new(AtomicBool::new(false));
+            let retrier_punished_2 = Arc::new(AtomicBool::new(false));
+            let result = {
+                let counter = counter.to_owned();
+                let retrier_punished_1 = retrier_punished_1.to_owned();
+                let retrier_punished_2 = retrier_punished_2.to_owned();
+                downloader.try_with_timeout(ApiName::IoGetfile, move |count| {
                     counter.store(count + 1, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
@@ -763,27 +845,34 @@ mod tests {
                         ),
                         _ => unreachable!(),
                     }
-                },
-                2,
-            )
-        }
-        .await;
+                })
+            }
+            .await
+            .unwrap();
 
-        assert!(matches!(result, TryResult::Success(2)));
-        assert!(retrier_punished_1.load(Relaxed));
-        assert!(!retrier_punished_2.load(Relaxed));
-        assert_eq!(counter.load(Relaxed), 2);
+            assert_eq!(result, 2);
+            assert!(retrier_punished_1.load(Relaxed));
+            assert!(!retrier_punished_2.load(Relaxed));
+            assert_eq!(counter.load(Relaxed), 2);
 
-        counter.store(0, Relaxed);
-        retrier_punished_1.store(false, Relaxed);
-        retrier_punished_2.store(false, Relaxed);
+            sleep(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(1));
+                assert_eq!(record.failed_count(), Some(0));
+            }
 
-        let result = {
-            let counter = counter.to_owned();
-            let retrier_punished_1 = retrier_punished_1.to_owned();
-            let retrier_punished_2 = retrier_punished_2.to_owned();
-            try_with_timeout(
-                move |count| {
+            counter.store(0, Relaxed);
+            retrier_punished_1.store(false, Relaxed);
+            retrier_punished_2.store(false, Relaxed);
+
+            let result = {
+                let counter = counter.to_owned();
+                let retrier_punished_1 = retrier_punished_1.to_owned();
+                let retrier_punished_2 = retrier_punished_2.to_owned();
+                downloader.try_with_timeout(ApiName::IoGetfile, move |count| {
                     counter.store(count + 1, Relaxed);
                     let retrier_punished_1 = retrier_punished_1.to_owned();
                     let retrier_punished_2 = retrier_punished_2.to_owned();
@@ -802,20 +891,27 @@ mod tests {
                         ),
                         _ => unreachable!(),
                     }
-                },
-                2,
-            )
-        }
-        .await;
+                })
+            }
+            .await
+            .unwrap();
 
-        assert!(matches!(result, TryResult::Success(1)));
-        assert!(!retrier_punished_1.load(Relaxed));
-        assert!(!retrier_punished_2.load(Relaxed));
-        assert_eq!(counter.load(Relaxed), 2);
+            assert_eq!(result, 1);
+            assert!(!retrier_punished_1.load(Relaxed));
+            assert!(!retrier_punished_2.load(Relaxed));
+            assert_eq!(counter.load(Relaxed), 2);
 
-        let result = {
-            try_with_timeout(
-                move |count| {
+            sleep(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(0));
+            }
+
+            let err = {
+                downloader.try_with_timeout(ApiName::IoGetfile, move |count| {
                     assert!(count < 2);
                     FakedRetrier::new(
                         Duration::from_millis(1000),
@@ -823,14 +919,48 @@ mod tests {
                         Duration::from_millis(4000),
                         Arc::new(AtomicBool::new(false)),
                     )
-                },
-                2,
-            )
-        }
-        .await;
+                })
+            }
+            .await
+            .unwrap_err();
 
-        assert!(matches!(result, TryResult::AllTimedOut));
+            assert_eq!(err.kind(), IoErrorKind::TimedOut);
+            assert_eq!(&err.to_string(), "All concurrency requests are timed out");
 
+            sleep(Duration::from_secs(5)).await;
+            {
+                let record = records_map
+                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .unwrap();
+                assert_eq!(record.success_count(), Some(2));
+                assert_eq!(record.failed_count(), Some(1));
+            }
+        });
+
+        Ok(())
+    }
+
+    fn get_credential() -> Credential {
+        Credential::new("1234567890", "abcdefghijk")
+    }
+
+    async fn clear_cache() -> IoResult<()> {
+        let cache_file_path = cache_dir_path_of("query-cache.json").await?;
+        remove_file(&cache_file_path).await.or_else(|err| {
+            if err.kind() == IoErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })?;
+        let dot_file_path = cache_dir_path_of(DOT_FILE_NAME).await?;
+        remove_file(&dot_file_path).await.or_else(|err| {
+            if err.kind() == IoErrorKind::NotFound {
+                Ok(())
+            } else {
+                Err(err)
+            }
+        })?;
         Ok(())
     }
 }
