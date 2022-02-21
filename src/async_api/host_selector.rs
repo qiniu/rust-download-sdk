@@ -272,9 +272,11 @@ impl HostPunisher {
         hosts_count * usize::from(self.max_punished_hosts_percent) / 100
     }
 
-    fn is_available(&self, punished_info: &PunishedInfo) -> bool {
-        !punished_info.failed_to_connect
-            && punished_info.continuous_punished_times <= self.max_punished_times
+    fn is_available(&self, punished_info: &PunishedInfo, connection_sensitive: bool) -> bool {
+        if connection_sensitive && punished_info.failed_to_connect {
+            return false;
+        }
+        punished_info.continuous_punished_times <= self.max_punished_times
     }
 
     fn is_punishment_expired(&self, punished_info: &PunishedInfo) -> bool {
@@ -434,7 +436,7 @@ impl HostSelector {
                     .get(host)
                     .map(|punished_info| {
                         self.host_punisher.is_punishment_expired(&punished_info)
-                            || self.host_punisher.is_available(&punished_info)
+                            || self.host_punisher.is_available(&punished_info, true)
                     })
                     .unwrap_or(true)
             })
@@ -585,7 +587,7 @@ impl HostSelector {
                     host, punished_info.continuous_punished_times, punished_info.timeout_power
                 );
 
-                if !self.host_punisher.is_available(&punished_info) {
+                if !self.host_punisher.is_available(&punished_info, false) {
                     return PunishResult::PunishedAndFreezed;
                 }
             }
@@ -609,7 +611,7 @@ impl HostSelector {
     }
 
     fn is_satisfied_with(&self, punished_info: &PunishedInfo) -> bool {
-        self.host_punisher.is_available(punished_info)
+        self.host_punisher.is_available(punished_info, true)
             && self.hosts_updater.current_timeout_power.load(Relaxed) >= punished_info.timeout_power
     }
 }
@@ -621,22 +623,22 @@ pub(super) enum PunishResult {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct HostInfo {
+pub(super) struct HostInfo {
     host: String,
     timeout_power: usize,
     timeout: Duration,
 }
 
 impl HostInfo {
-    pub(crate) fn host(&self) -> &str {
+    pub(super) fn host(&self) -> &str {
         &self.host
     }
 
-    pub(crate) fn timeout_power(&self) -> usize {
+    pub(super) fn timeout_power(&self) -> usize {
         self.timeout_power
     }
 
-    pub(crate) fn timeout(&self) -> Duration {
+    pub(super) fn timeout(&self) -> Duration {
         self.timeout
     }
 }

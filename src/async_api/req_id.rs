@@ -27,13 +27,13 @@ pub fn total_download_duration(t: SystemTime) -> Duration {
 
 pub(crate) const REQUEST_ID_HEADER: &str = "X-ReqId";
 
-pub(crate) fn get_req_id(tn: SystemTime, index: usize, timeout: Duration) -> HeaderValue {
+pub(crate) fn get_req_id(tn: SystemTime, tries: usize, timeout: Duration) -> HeaderValue {
     let (start_time, delta) = get_start_time_and_delta(tn);
     HeaderValue::try_from(format!(
         "r{}-{}-t{}-o{}",
         start_time,
         delta,
-        index,
+        tries,
         timeout.as_millis()
     ))
     .expect("Unexpected invalid header value")
@@ -41,8 +41,8 @@ pub(crate) fn get_req_id(tn: SystemTime, index: usize, timeout: Duration) -> Hea
 
 pub(crate) fn get_req_id2(
     tn: SystemTime,
-    index: usize,
-    index2: usize,
+    tries: usize,
+    async_task_id: u32,
     timeout: Duration,
 ) -> HeaderValue {
     let (start_time, delta) = get_start_time_and_delta(tn);
@@ -50,8 +50,8 @@ pub(crate) fn get_req_id2(
         "r{}-{}-t{}-a{}-o{}",
         start_time,
         delta,
-        index,
-        index2,
+        tries,
+        async_task_id,
         timeout.as_millis()
     ))
     .expect("Unexpected invalid header value")

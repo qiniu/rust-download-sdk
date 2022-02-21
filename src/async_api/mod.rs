@@ -13,7 +13,6 @@ pub use dot::{
 };
 
 mod download;
-pub(crate) use download::AsyncRangeReaderBuilder;
 pub use download::{sign_download_url_with_deadline, sign_download_url_with_lifetime, RangePart};
 
 mod retrier;

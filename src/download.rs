@@ -4,7 +4,7 @@ use super::{
     },
     base::{credential::Credential, download::RangeReaderBuilder as BaseRangeReaderBuilder},
     config::{
-        build_base_range_reader_builder_from_config, build_base_range_reader_builder_from_env,
+        build_range_reader_builder_from_config, build_range_reader_builder_from_env,
         with_current_qiniu_config, Config,
     },
     sync_api::{
@@ -142,7 +142,7 @@ impl RangeReaderBuilder {
     }
 
     /// 设置最大并行重试次数，如果设置为 0 则表示禁止并行重试功能
-    pub fn max_retry_concurrency(self, max_retry_concurrency: usize) -> Self {
+    pub fn max_retry_concurrency(self, max_retry_concurrency: u32) -> Self {
         self.with_inner(|b| b.max_retry_concurrency(max_retry_concurrency))
     }
 
@@ -180,10 +180,7 @@ impl RangeReaderBuilder {
     /// * `config` - 下载配置
 
     pub fn from_config(key: impl Into<String>, config: &Config) -> Self {
-        Self(build_base_range_reader_builder_from_config(
-            key.into(),
-            config,
-        ))
+        Self(build_range_reader_builder_from_config(key.into(), config))
     }
 
     /// 从环境变量创建范围下载构建器
@@ -192,7 +189,7 @@ impl RangeReaderBuilder {
     /// * `key` - 对象名称
 
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
-        build_base_range_reader_builder_from_env(key.into(), false).map(Self)
+        build_range_reader_builder_from_env(key.into(), false).map(Self)
     }
 }
 

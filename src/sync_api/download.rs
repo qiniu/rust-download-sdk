@@ -196,7 +196,7 @@ impl RangeReaderBuilder {
     }
 
     pub(crate) fn from_config(key: String, config: &Config) -> Self {
-        build_range_reader_builder_from_config(key, config)
+        build_range_reader_builder_from_config(key, config).into()
     }
 }
 

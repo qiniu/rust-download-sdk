@@ -41,7 +41,7 @@ pub struct Config {
     punish_time_s: Option<u64>,
     base_timeout_ms: Option<u64>,
     dial_timeout_ms: Option<u64>,
-    max_retry_concurrency: Option<usize>,
+    max_retry_concurrency: Option<u32>,
 
     #[serde(skip)]
     extra: Extra,
@@ -289,13 +289,13 @@ impl Config {
 
     /// 获取最大并行重试次数
     #[inline]
-    pub fn max_retry_concurrency(&self) -> Option<usize> {
+    pub fn max_retry_concurrency(&self) -> Option<u32> {
         self.max_retry_concurrency
     }
 
     /// 设置最大并行重试次数，如果设置为 Some(0) 则表示禁止并行重试功能
     #[inline]
-    pub fn set_max_retry_concurrency(&mut self, max_retry_concurrency: Option<usize>) -> &mut Self {
+    pub fn set_max_retry_concurrency(&mut self, max_retry_concurrency: Option<u32>) -> &mut Self {
         self.max_retry_concurrency = max_retry_concurrency;
         self.uninit_range_reader_inner();
         self
@@ -471,7 +471,7 @@ impl ConfigBuilder {
 
     /// 配置最大并行重试次数，默认为 5，如果设置为 Some(0) 则表示禁止并行重试功能
     #[inline]
-    pub fn max_retry_concurrency(mut self, max_retry_concurrency: Option<usize>) -> Self {
+    pub fn max_retry_concurrency(mut self, max_retry_concurrency: Option<u32>) -> Self {
         self.0.max_retry_concurrency = max_retry_concurrency;
         self
     }
