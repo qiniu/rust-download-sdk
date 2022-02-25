@@ -240,7 +240,7 @@ impl RangeReader {
     /// * `key` - 对象名称
     pub fn from_env(key: impl Into<String>) -> Option<Self> {
         let key = key.into();
-        let range_reader = with_current_qiniu_config(|config| {
+        with_current_qiniu_config(|config| {
             config.and_then(|config| {
                 config.with_key(&key.to_owned(), |config| {
                     if config.max_retry_concurrency() == Some(0) {
@@ -254,11 +254,8 @@ impl RangeReader {
                     }
                 })
             })
-        });
-        match range_reader {
-            Some(Some(range_reader)) => Some(range_reader),
-            _ => None,
-        }
+        })
+        .flatten()
     }
 
     /// 主动更新域名列表
