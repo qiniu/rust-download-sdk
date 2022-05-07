@@ -43,6 +43,7 @@ use tokio::{
     sync::Mutex,
 };
 use tokio_util::{compat::FuturesAsyncReadCompatExt, either::Either};
+use url_escape::encode_path;
 
 /// 为私有空间签发对象下载 URL
 /// # Arguments
@@ -987,7 +988,7 @@ impl AsyncRangeReader {
                     url.push('/');
                 }
             }
-            url.push_str(key);
+            url.push_str(&encode_path(key));
             url
         }
 

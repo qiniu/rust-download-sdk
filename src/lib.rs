@@ -45,3 +45,5 @@ pub use config::{
     SingleClusterConfigBuilder,
 };
 pub use download::{RangeReader, RangeReaderBuilder};
+
+use hashbrown as _;
