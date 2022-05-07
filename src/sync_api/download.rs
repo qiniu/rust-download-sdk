@@ -33,6 +33,7 @@ use std::{
 };
 use tap::prelude::*;
 use text_io::{try_scan as try_scan_text, Error as TextIOError};
+use url_escape::encode_path;
 
 #[derive(Debug)]
 pub(crate) struct RangeReader {
@@ -868,7 +869,7 @@ impl RangeReader {
                     url.push('/');
                 }
             }
-            url.push_str(key);
+            url.push_str(&encode_path(key));
             url
         }
 

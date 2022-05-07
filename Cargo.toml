@@ -40,6 +40,8 @@ mime = "0.3.16"
 multer = "2.0.2"
 async-trait = "0.1.52"
 async-once-cell = "0.3.0"
+url-escape = "=0.1.0"
+hashbrown = "0.11.2"
 
 [dev-dependencies]
 warp = { version = "0.3.2", default-features = false, features = ["multipart"] }
