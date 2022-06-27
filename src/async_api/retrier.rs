@@ -694,7 +694,7 @@ mod tests {
     use super::{
         super::{
             cache_dir::cache_dir_path_of,
-            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
+            dot::{AsyncDotRecordsMap, DotRecordKey, DotRecords, DOT_FILE_NAME},
             download::AsyncRangeReaderBuilder,
         },
         *,
@@ -764,16 +764,19 @@ mod tests {
                     io_rx.await.unwrap();
                 },
             );
-            let $records_map = Arc::new(DotRecordsDashMap::default());
+            let $records_map = Arc::new(AsyncDotRecordsMap::default());
             let monitor_routes = {
                 let records_map = $records_map.to_owned();
                 path!("v1" / "stat")
                     .and(warp::header::value(AUTHORIZATION.as_str()))
                     .and(warp::body::json())
-                    .map(move |authorization: HeaderValue, records: DotRecords| {
+                    .then(move |authorization: HeaderValue, records: DotRecords| {
                         assert!(authorization.to_str().unwrap().starts_with("UpToken "));
-                        records_map.merge_with_records(records);
-                        Response::new(Body::empty())
+                        let records_map = records_map.to_owned();
+                        async move {
+                            records_map.merge_with_records(records).await;
+                            Response::new(Body::empty())
+                        }
                     })
             };
             let ($monitor_addr, monitor_server) = warp::serve(monitor_routes)
@@ -794,9 +797,7 @@ mod tests {
         env_logger::try_init().ok();
         clear_cache().await?;
 
-        let io_routes = path!("file").map(|| {
-            Response::new("1234567890".into())
-        });
+        let io_routes = path!("file").map(|| Response::new("1234567890".into()));
 
         starts_with_server!(io_addr, monitor_addr, io_routes, records_map, {
             let io_urls = vec![format!("http://{}", io_addr)];
@@ -858,7 +859,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(1));
                 assert_eq!(record.failed_count(), Some(0));
@@ -904,7 +909,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(0));
@@ -930,7 +939,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(1));

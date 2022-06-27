@@ -5,16 +5,17 @@ use super::{
     cache_dir::cache_dir_path_of,
     host_selector::{HostInfo, HostSelector, PunishResult},
 };
-use dashmap::DashMap;
 use fd_lock::RwLock as FdRwLock;
+use futures::future::join_all;
 use log::{debug, info, warn};
 use reqwest::{header::AUTHORIZATION, Client as HttpClient, StatusCode};
+use scc::HashMap;
 use serde::{de::Error as DeserializeError, Deserialize, Serialize};
 use serde_json::Value as JSONValue;
 use std::{
-    collections::HashMap,
+    collections::HashMap as StdHashMap,
     convert::TryFrom,
-    fmt,
+    fmt::{self, Debug},
     future::Future,
     io::{Error as IoError, ErrorKind as IoErrorKind, Result as IoResult, SeekFrom},
     ops::Deref,
@@ -124,18 +125,33 @@ pub(super) struct Dotter {
     inner: Option<Arc<DotterInner>>,
 }
 
-#[derive(Debug)]
 struct DotterInner {
     credential: Credential,
     bucket: String,
     monitor_selector: HostSelector,
-    buffered_records: DotRecordsDashMap,
+    buffered_records: AsyncDotRecordsMap,
     buffered_file: Mutex<FdRwLock<File>>,
     interval: Duration,
     uploaded_at: Instant,
     max_buffer_size: u64,
     tries: usize,
     http_client: Arc<HttpClient>,
+}
+
+impl Debug for DotterInner {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DotterInner")
+            .field("credential", &self.credential)
+            .field("bucket", &self.bucket)
+            .field("monitor_selector", &self.monitor_selector)
+            .field("buffered_file", &self.buffered_file)
+            .field("interval", &self.interval)
+            .field("uploaded_at", &self.uploaded_at)
+            .field("max_buffer_size", &self.max_buffer_size)
+            .field("tries", &self.tries)
+            .field("http_client", &self.http_client)
+            .finish()
+    }
 }
 
 pub(super) const DOT_FILE_NAME: &str = "dot-file";
@@ -201,7 +217,9 @@ impl Dotter {
         if is_dotting_disabled() {
             debug!("dotting is disabled")
         } else if let Some(inner) = self.inner.as_ref() {
-            inner.fast_dot(dot_type, api_name, successful, elapsed_duration);
+            inner
+                .fast_dot(dot_type, api_name, successful, elapsed_duration)
+                .await;
             inner
                 .lock_buffered_file(|mut buffered_file| async move {
                     inner.flush_to_file(&mut buffered_file).await?;
@@ -219,7 +237,7 @@ impl Dotter {
         if is_dotting_disabled() {
             debug!("dotting is disabled")
         } else if let Some(inner) = self.inner.as_ref() {
-            inner.fast_punish();
+            inner.fast_punish().await;
             inner
                 .lock_buffered_file(|mut buffered_file| async move {
                     inner.flush_to_file(&mut buffered_file).await?;
@@ -252,7 +270,7 @@ impl Dotter {
 }
 
 impl DotterInner {
-    fn fast_dot(
+    async fn fast_dot(
         &self,
         dot_type: DotType,
         api_name: ApiName,
@@ -278,29 +296,46 @@ impl DotterInner {
                 elapsed_duration.as_millis(),
             )
         };
-        self.buffered_records.merge_with_record(record);
+        self.buffered_records.merge_with_record(record).await;
     }
 
-    fn fast_punish(&self) {
+    async fn fast_punish(&self) {
         self.buffered_records
-            .merge_with_record(DotRecord::punished());
+            .merge_with_record(DotRecord::punished())
+            .await;
     }
 
     async fn flush_to_file(&self, buffered_file: &mut File) -> IoResult<()> {
-        let mut buffered_file = BufWriter::new(buffered_file);
-        for shard in self.buffered_records.shards() {
-            let mut map = shard.write();
-            let mut to_delete_keys = Vec::new();
-            for (key, value) in map.iter() {
-                if write_to_file(value.get(), &mut buffered_file).await.is_ok() {
-                    to_delete_keys.push(*key);
-                }
-            }
-            for key in to_delete_keys.iter() {
-                map.remove(key);
+        let buffered_file = Arc::new(Mutex::new(BufWriter::new(buffered_file)));
+        {
+            let mut futures = vec![];
+            self.buffered_records
+                .scan_async(|key, record| {
+                    let key = key.to_owned();
+                    let record = record.to_owned();
+                    let buffered_file = buffered_file.to_owned();
+                    futures.push(async move {
+                        if write_to_file(&record, &mut *buffered_file.lock().await)
+                            .await
+                            .is_ok()
+                        {
+                            Some(key)
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .await;
+            for key in join_all(futures).await.into_iter().flatten() {
+                self.buffered_records.remove_async(&key).await;
             }
         }
-        buffered_file.flush().await?;
+
+        Arc::try_unwrap(buffered_file)
+            .unwrap()
+            .into_inner()
+            .flush()
+            .await?;
 
         return Ok(());
 
@@ -352,19 +387,22 @@ impl DotterInner {
                 ),
             );
             let begin_at = Instant::now();
-            self.http_client
+            let response_result = self
+                .http_client
                 .post(&url)
                 .header(AUTHORIZATION, format!("UpToken {}", uptoken))
                 .json(&self.make_request_body(&mut buffered_file).await?)
                 .timeout(host_info.timeout())
                 .send()
-                .await
-                .tap_err(|err| {
-                    if err.is_timeout() {
-                        self.monitor_selector
-                            .increase_timeout_power_by(host_info.host(), host_info.timeout_power());
-                    }
-                })
+                .await;
+            if let Err(err) = &response_result {
+                if err.is_timeout() {
+                    self.monitor_selector
+                        .increase_timeout_power_by(host_info.host(), host_info.timeout_power())
+                        .await;
+                }
+            }
+            let response_result = response_result
                 .map_err(|err| IoError::new(IoErrorKind::ConnectionAborted, err))
                 .and_then(|resp| {
                     if resp.status() != StatusCode::OK {
@@ -375,15 +413,15 @@ impl DotterInner {
                     } else {
                         Ok(())
                     }
-                })
-                .tap(|result| {
-                    self.fast_dot(
-                        DotType::Http,
-                        ApiName::MonitorV1Stat,
-                        result.is_ok(),
-                        begin_at.elapsed(),
-                    );
-                })
+                });
+            self.fast_dot(
+                DotType::Http,
+                ApiName::MonitorV1Stat,
+                response_result.is_ok(),
+                begin_at.elapsed(),
+            )
+            .await;
+            response_result
                 .tap_ok(|_| info!("upload dots succeed"))
                 .tap_err(|err| warn!("failed to upload dots: {:?}", err))?;
             buffered_file.set_len(0).await?;
@@ -433,7 +471,7 @@ impl DotterInner {
                                 return Err(err);
                             }
                             PunishResult::PunishedAndFreezed => {
-                                self.fast_punish();
+                                self.fast_punish().await;
                             }
                             PunishResult::Punished => {}
                         }
@@ -671,14 +709,12 @@ impl DotRecords {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct DotRecordsMap {
-    m: HashMap<DotRecordKey, DotRecord>,
-}
+pub(super) struct DotRecordsMap(StdHashMap<DotRecordKey, DotRecord>);
 
 impl DotRecordsMap {
     #[allow(dead_code)]
     pub(super) fn merge_with_record(&mut self, record: DotRecord) {
-        self.m
+        self.0
             .entry(record.key())
             .and_modify(|mut r| match (&mut r, &record) {
                 (DotRecord::APICalls(r), DotRecord::APICalls(record)) => {
@@ -723,56 +759,57 @@ impl DotRecordsMap {
     #[allow(dead_code)]
     pub(super) fn into_records(self) -> DotRecords {
         DotRecords {
-            records: self.m.into_iter().map(|(_, v)| v).collect(),
+            records: self.0.into_iter().map(|(_, v)| v).collect(),
         }
     }
 }
 
 impl Deref for DotRecordsMap {
-    type Target = HashMap<DotRecordKey, DotRecord>;
+    type Target = StdHashMap<DotRecordKey, DotRecord>;
 
     fn deref(&self) -> &Self::Target {
-        &self.m
+        &self.0
     }
 }
 
-#[derive(Debug, Clone, Default)]
-pub(super) struct DotRecordsDashMap {
-    m: DashMap<DotRecordKey, DotRecord>,
-}
+#[derive(Default)]
+pub(super) struct AsyncDotRecordsMap(HashMap<DotRecordKey, DotRecord>);
 
-impl DotRecordsDashMap {
+impl AsyncDotRecordsMap {
     #[allow(dead_code)]
-    pub(super) fn merge_with_record(&self, record: DotRecord) {
-        self.m
-            .entry(record.key())
-            .and_modify(|mut r| match (&mut r, &record) {
-                (DotRecord::APICalls(r), DotRecord::APICalls(record)) => {
-                    let success_elapsed_duration_total = r.success_avg_elapsed_duration
-                        * to_u128(r.success_count)
-                        + record.success_avg_elapsed_duration * to_u128(record.success_count);
-                    let failed_elapsed_duration_total = r.failed_avg_elapsed_duration
-                        * to_u128(r.failed_count)
-                        + record.failed_avg_elapsed_duration * to_u128(record.failed_count);
-                    r.success_count += record.success_count;
-                    r.failed_count += record.failed_count;
-                    r.success_avg_elapsed_duration = if r.success_count > 0 {
-                        success_elapsed_duration_total / to_u128(r.success_count)
-                    } else {
-                        0
-                    };
-                    r.failed_avg_elapsed_duration = if r.failed_count > 0 {
-                        failed_elapsed_duration_total / to_u128(r.failed_count)
-                    } else {
-                        0
-                    };
-                }
-                (DotRecord::PunishedCount(r), DotRecord::PunishedCount(record)) => {
-                    r.punished_count += record.punished_count;
-                }
-                _ => panic!("Impossible merge with {:?} and {:?}", r, record),
-            })
-            .or_insert(record);
+    pub(super) async fn merge_with_record(&self, record: DotRecord) {
+        self.0
+            .upsert_async(
+                record.key(),
+                || record.to_owned(),
+                |_, mut r| match (&mut r, &record) {
+                    (DotRecord::APICalls(r), DotRecord::APICalls(record)) => {
+                        let success_elapsed_duration_total = r.success_avg_elapsed_duration
+                            * to_u128(r.success_count)
+                            + record.success_avg_elapsed_duration * to_u128(record.success_count);
+                        let failed_elapsed_duration_total = r.failed_avg_elapsed_duration
+                            * to_u128(r.failed_count)
+                            + record.failed_avg_elapsed_duration * to_u128(record.failed_count);
+                        r.success_count += record.success_count;
+                        r.failed_count += record.failed_count;
+                        r.success_avg_elapsed_duration = if r.success_count > 0 {
+                            success_elapsed_duration_total / to_u128(r.success_count)
+                        } else {
+                            0
+                        };
+                        r.failed_avg_elapsed_duration = if r.failed_count > 0 {
+                            failed_elapsed_duration_total / to_u128(r.failed_count)
+                        } else {
+                            0
+                        };
+                    }
+                    (DotRecord::PunishedCount(r), DotRecord::PunishedCount(record)) => {
+                        r.punished_count += record.punished_count;
+                    }
+                    _ => panic!("Impossible merge with {:?} and {:?}", r, record),
+                },
+            )
+            .await;
 
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
@@ -780,25 +817,29 @@ impl DotRecordsDashMap {
     }
 
     #[allow(dead_code)]
-    pub(super) fn merge_with_records(&self, records: DotRecords) {
+    pub(super) async fn merge_with_records(&self, records: DotRecords) {
         for record in records.records.into_iter() {
-            self.merge_with_record(record);
+            self.merge_with_record(record).await;
         }
     }
 
     #[allow(dead_code)]
-    pub(super) fn into_records(self) -> DotRecords {
-        DotRecords {
-            records: self.m.into_iter().map(|(_, v)| v).collect(),
-        }
+    pub(super) async fn into_records(self) -> DotRecords {
+        let mut records = Vec::new();
+        self.0
+            .for_each_async(|_, record| {
+                records.push(record.to_owned());
+            })
+            .await;
+        DotRecords { records }
     }
 }
 
-impl Deref for DotRecordsDashMap {
-    type Target = DashMap<DotRecordKey, DotRecord>;
+impl Deref for AsyncDotRecordsMap {
+    type Target = HashMap<DotRecordKey, DotRecord>;
 
     fn deref(&self) -> &Self::Target {
-        &self.m
+        &self.0
     }
 }
 
@@ -942,17 +983,20 @@ mod tests {
     async fn test_dotter_dot_something() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
         clear_cache().await?;
-        let records_map = Arc::new(DotRecordsDashMap::default());
+        let records_map = Arc::new(AsyncDotRecordsMap::default());
 
         let routes = {
             let records_map = records_map.to_owned();
             path!("v1" / "stat")
                 .and(warp::header::value(AUTHORIZATION.as_str()))
                 .and(warp::body::json())
-                .map(move |authorization: HeaderValue, records: DotRecords| {
+                .then(move |authorization: HeaderValue, records: DotRecords| {
                     assert!(authorization.to_str().unwrap().starts_with("UpToken "));
-                    records_map.merge_with_records(records);
-                    Response::new(Body::empty())
+                    let records_map = records_map.to_owned();
+                    async move {
+                        records_map.merge_with_records(records).await;
+                        Response::new(Body::empty())
+                    }
                 })
         };
 
@@ -1166,7 +1210,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::UcV4Query))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::UcV4Query),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(1));
@@ -1175,7 +1223,11 @@ mod tests {
             }
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(1));
                 assert_eq!(record.failed_count(), Some(1));
@@ -1184,7 +1236,11 @@ mod tests {
             }
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::UcV4Query),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(4));
                 assert_eq!(record.failed_count(), Some(1));
@@ -1193,7 +1249,11 @@ mod tests {
             }
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(1));
@@ -1208,17 +1268,20 @@ mod tests {
     async fn test_dotter_punish() -> Result<(), Box<dyn Error>> {
         env_logger::try_init().ok();
         clear_cache().await?;
-        let records_map = Arc::new(DotRecordsDashMap::default());
+        let records_map = Arc::new(AsyncDotRecordsMap::default());
 
         let routes = {
             let records_map = records_map.to_owned();
             path!("v1" / "stat")
                 .and(warp::header::value(AUTHORIZATION.as_str()))
                 .and(warp::body::json())
-                .map(move |authorization: HeaderValue, records: DotRecords| {
+                .then(move |authorization: HeaderValue, records: DotRecords| {
                     assert!(authorization.to_str().unwrap().starts_with("UpToken "));
-                    records_map.merge_with_records(records);
-                    Response::new(Body::empty())
+                    let records_map = records_map.to_owned();
+                    async move {
+                        records_map.merge_with_records(records).await;
+                        Response::new(Body::empty())
+                    }
                 })
         };
         starts_with_server!(addr, routes, {
@@ -1263,7 +1326,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Sdk, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(1));
                 assert_eq!(record.failed_count(), Some(0));
@@ -1271,7 +1338,10 @@ mod tests {
                 assert_eq!(record.failed_avg_elapsed_duration_ms(), Some(0));
             }
             {
-                let record = records_map.get(&DotRecordKey::punished()).unwrap();
+                let record = records_map
+                    .read_async(&DotRecordKey::punished(), |_, record| record.to_owned())
+                    .await
+                    .unwrap();
                 assert_eq!(record.punished_count(), Some(5));
             }
         });

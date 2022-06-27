@@ -1,7 +1,7 @@
 use super::dot::Dotter;
-use dashmap::DashMap;
 use log::info;
 use rand::{seq::SliceRandom, thread_rng};
+use scc::HashMap;
 use std::{
     cmp::{min, Ordering},
     collections::HashSet,
@@ -132,7 +132,7 @@ type UpdateFn = Box<
 
 struct HostsUpdater {
     hosts: RwLock<Vec<String>>,
-    hosts_map: DashMap<String, PunishedInfo>,
+    hosts_map: HashMap<String, PunishedInfo>,
     update_option: Option<UpdateOption>,
     index: AtomicUsize,
     current_timeout_power: AtomicUsize,
@@ -155,14 +155,18 @@ impl UpdateOption {
 }
 
 impl HostsUpdater {
-    fn new(hosts: Vec<String>, update_option: Option<UpdateOption>) -> Arc<Self> {
+    async fn new(hosts: Vec<String>, update_option: Option<UpdateOption>) -> Arc<Self> {
+        let hosts_map = HashMap::default();
+        for host in &hosts {
+            hosts_map
+                .insert_async(host.to_owned(), Default::default())
+                .await
+                .ok();
+        }
         Arc::new(Self {
-            hosts_map: hosts
-                .iter()
-                .map(|host| (host.to_owned(), Default::default()))
-                .collect(),
-            hosts: RwLock::new(hosts),
+            hosts_map,
             update_option,
+            hosts: RwLock::new(hosts),
             index: AtomicUsize::new(0),
             current_timeout_power: AtomicUsize::new(0),
         })
@@ -172,10 +176,13 @@ impl HostsUpdater {
         let mut new_hosts_set = HashSet::with_capacity(hosts.len());
         for host in hosts.iter() {
             new_hosts_set.insert(host.to_owned());
-            self.hosts_map.entry(host.to_owned()).or_default();
+            self.hosts_map
+                .upsert_async(host.to_owned(), Default::default, |_, _| {})
+                .await;
         }
         self.hosts_map
-            .retain(|host, _| new_hosts_set.contains(host));
+            .retain_async(|host, _| new_hosts_set.contains(host))
+            .await;
         hosts.shuffle(&mut thread_rng());
         *self.hosts.write().await = hosts;
     }
@@ -222,33 +229,35 @@ impl HostsUpdater {
         }
     }
 
-    pub(super) fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
-        if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
-            timeout_power = timeout_power.saturating_add(1);
-            if punished_info.timeout_power < timeout_power {
-                punished_info.timeout_power = timeout_power;
-                info!(
-                    "The timeout_power of host {} increases, now is {}",
-                    host, punished_info.timeout_power
-                );
-            }
-            punished_info.last_punished_at = OptionalInstantTime::now();
-        }
+    pub(super) async fn increase_timeout_power_by(&self, host: &str, mut timeout_power: usize) {
+        self.hosts_map
+            .update_async(host, |_, punished_info| {
+                timeout_power = timeout_power.saturating_add(1);
+                if punished_info.timeout_power < timeout_power {
+                    punished_info.timeout_power = timeout_power;
+                    info!(
+                        "The timeout_power of host {} increases, now is {}",
+                        host, punished_info.timeout_power
+                    );
+                }
+                punished_info.last_punished_at = OptionalInstantTime::now();
+            })
+            .await;
     }
 
-    pub(super) fn mark_connection_as_failed(&self, host: &str) {
-        if let Some(mut punished_info) = self.hosts_map.get_mut(host) {
-            punished_info.failed_to_connect = true;
-            punished_info.last_punished_at = OptionalInstantTime::now();
-        }
+    pub(super) async fn mark_connection_as_failed(&self, host: &str) {
+        self.hosts_map
+            .update_async(host, |_, punished_info| {
+                punished_info.failed_to_connect = true;
+                punished_info.last_punished_at = OptionalInstantTime::now();
+            })
+            .await;
     }
 }
 
 impl Debug for HostsUpdater {
     fn fmt(&self, f: &mut Formatter<'_>) -> FormatResult {
-        f.debug_struct("HostsUpdater")
-            .field("hosts_map", &self.hosts_map)
-            .finish()
+        f.debug_struct("HostsUpdater").finish()
     }
 }
 
@@ -396,7 +405,8 @@ impl HostSelectorBuilder {
             self.hosts,
             self.update_func
                 .map(|f| UpdateOption::new(f, update_interval)),
-        );
+        )
+        .await;
 
         if auto_update_enabled && is_hosts_empty {
             hosts_updater.update_hosts().await;
@@ -433,10 +443,9 @@ impl HostSelector {
             .filter(|&host| {
                 self.hosts_updater
                     .hosts_map
-                    .get(host)
-                    .map(|punished_info| {
-                        self.host_punisher.is_punishment_expired(&punished_info)
-                            || self.host_punisher.is_available(&punished_info, true)
+                    .read(host, |_, punished_info| {
+                        self.host_punisher.is_punishment_expired(punished_info)
+                            || self.host_punisher.is_available(punished_info, true)
                     })
                     .unwrap_or(true)
             })
@@ -485,35 +494,33 @@ impl HostSelector {
             let host = hosts[index % hosts.len()].as_str();
             if tried.contains(host) {
                 continue;
-            } else if let Some(punished_info) = self.hosts_updater.hosts_map.get(host) {
-                if self.host_punisher.is_punishment_expired(&punished_info) {
+            } else if let Some(true) = self.hosts_updater.hosts_map.read_async(host, |_, punished_info| {
+                if self.host_punisher.is_punishment_expired(punished_info) {
                     info!("host {} is selected directly because there is no punishment or punishment is expired, timeout: {:?}", host,self.host_punisher.base_timeout);
                     chosen_host_info = Some(CurrentHostInfo {
                         host,
                         timeout: self.host_punisher.base_timeout,
                         timeout_power: 0,
                     });
-                    break;
-                }
-
-                if self.is_satisfied_with(&punished_info) {
+                    true
+                } else if self.is_satisfied_with(punished_info) {
                     info!(
                         "host {} is selected, timeout: {:?}, timeout power: {:?}",
                         host,
-                        self.host_punisher.timeout(&punished_info),
+                        self.host_punisher.timeout(punished_info),
                         punished_info.timeout_power,
                     );
                     chosen_host_info = Some(CurrentHostInfo {
                         host,
-                        timeout: self.host_punisher.timeout(&punished_info),
+                        timeout: self.host_punisher.timeout(punished_info),
                         timeout_power: punished_info.timeout_power,
                     });
-                    break;
+                    true
                 } else {
                     info!(
                         "host {} is unsatisfied, put it into candidates, timeout: {:?}, timeout power: {:?}",
                         host,
-                        self.host_punisher.timeout(&punished_info),
+                        self.host_punisher.timeout(punished_info),
                         punished_info.timeout_power,
                     );
                     candidates.push(Candidate {
@@ -522,7 +529,10 @@ impl HostSelector {
                         max_punished_times: self.host_punisher.max_punished_times,
                         punished_info: punished_info.to_owned(),
                     });
+                    false
                 }
+            }).await {
+                break;
             }
         }
         chosen_host_info
@@ -555,15 +565,18 @@ impl HostSelector {
     }
 
     pub(super) async fn reward(&self, host: &str) {
-        if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
-            punished_info.continuous_punished_times = 0;
-            punished_info.failed_to_connect = false;
-            punished_info.timeout_power = punished_info.timeout_power.saturating_sub(1);
-            info!(
-                "Reward host {}, now timeout_power is {}",
-                host, punished_info.timeout_power
-            );
-        }
+        self.hosts_updater
+            .hosts_map
+            .update_async(host, |_, punished_info| {
+                punished_info.continuous_punished_times = 0;
+                punished_info.failed_to_connect = false;
+                punished_info.timeout_power = punished_info.timeout_power.saturating_sub(1);
+                info!(
+                    "Reward host {}, now timeout_power is {}",
+                    host, punished_info.timeout_power
+                );
+            })
+            .await;
     }
 
     pub(super) async fn punish(&self, host: &str, error: &IoError, dotter: &Dotter) -> bool {
@@ -579,31 +592,39 @@ impl HostSelector {
 
     pub(super) async fn punish_without_dotter(&self, host: &str, error: &IoError) -> PunishResult {
         if self.host_punisher.should_punish(error).await {
-            if let Some(mut punished_info) = self.hosts_updater.hosts_map.get_mut(host) {
-                punished_info.continuous_punished_times += 1;
-                punished_info.last_punished_at = OptionalInstantTime::now();
-                info!(
+            let result = self
+                .hosts_updater
+                .hosts_map
+                .update_async(host, |_, punished_info| {
+                    punished_info.continuous_punished_times += 1;
+                    punished_info.last_punished_at = OptionalInstantTime::now();
+                    info!(
                     "Punish host {}, now continuous_punished_times is {}, and timeout_power is {}",
                     host, punished_info.continuous_punished_times, punished_info.timeout_power
                 );
 
-                if !self.host_punisher.is_available(&punished_info, false) {
-                    return PunishResult::PunishedAndFreezed;
-                }
-            }
-            PunishResult::Punished
+                    if self.host_punisher.is_available(punished_info, false) {
+                        None
+                    } else {
+                        Some(PunishResult::PunishedAndFreezed)
+                    }
+                })
+                .await
+                .flatten();
+            result.unwrap_or(PunishResult::Punished)
         } else {
             PunishResult::NoPunishment
         }
     }
 
-    pub(super) fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
+    pub(super) async fn increase_timeout_power_by(&self, host: &str, timeout_power: usize) {
         self.hosts_updater
             .increase_timeout_power_by(host, timeout_power)
+            .await
     }
 
-    pub(super) fn mark_connection_as_failed(&self, host: &str) {
-        self.hosts_updater.mark_connection_as_failed(host)
+    pub(super) async fn mark_connection_as_failed(&self, host: &str) {
+        self.hosts_updater.mark_connection_as_failed(host).await
     }
 
     pub(super) fn base_timeout(&self) -> Duration {
@@ -673,15 +694,16 @@ mod tests {
                 }),
                 Duration::from_secs(10),
             )),
-        );
+        )
+        .await;
         assert_eq!(hosts_updater.hosts.read().await.len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
         assert!(hosts_updater.update_hosts().await);
         assert_eq!(hosts_updater.hosts.read().await.len(), 4);
         assert_eq!(hosts_updater.hosts_map.len(), 4);
-        assert!(hosts_updater.hosts_map.get("http://host4").is_some());
-        assert!(hosts_updater.hosts_map.get("http://host5").is_some());
-        assert!(hosts_updater.hosts_map.get("http://host3").is_none());
+        assert!(hosts_updater.hosts_map.contains_async("http://host4").await);
+        assert!(hosts_updater.hosts_map.contains_async("http://host5").await);
+        assert!(!hosts_updater.hosts_map.contains_async("http://host3").await);
     }
 
     #[tokio::test]
@@ -738,7 +760,8 @@ mod tests {
                 }),
                 Duration::from_millis(500),
             )),
-        );
+        )
+        .await;
         HostsUpdater::next_index(&hosts_updater);
         assert_eq!(hosts_updater.hosts.read().await.len(), 3);
         assert_eq!(hosts_updater.hosts_map.len(), 3);
@@ -747,9 +770,9 @@ mod tests {
         sleep(Duration::from_millis(500)).await;
         assert_eq!(hosts_updater.hosts.read().await.len(), 4);
         assert_eq!(hosts_updater.hosts_map.len(), 4);
-        assert!(hosts_updater.hosts_map.get("http://host4").is_some());
-        assert!(hosts_updater.hosts_map.get("http://host5").is_some());
-        assert!(hosts_updater.hosts_map.get("http://host3").is_none());
+        assert!(hosts_updater.hosts_map.contains_async("http://host4").await);
+        assert!(hosts_updater.hosts_map.contains_async("http://host5").await);
+        assert!(!hosts_updater.hosts_map.contains_async("http://host3").await);
     }
 
     #[tokio::test]
@@ -812,7 +835,9 @@ mod tests {
                     .host,
                 "http://host1".to_owned()
             );
-            host_selector.increase_timeout_power_by("http://host1", 0);
+            host_selector
+                .increase_timeout_power_by("http://host1", 0)
+                .await;
             host_selector
                 .punish(
                     "http://host1",
@@ -851,7 +876,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host2".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.increase_timeout_power_by("http://host1", 1);
+            host_selector
+                .increase_timeout_power_by("http://host1", 1)
+                .await;
             host_selector
                 .punish(
                     "http://host1",
@@ -882,7 +909,9 @@ mod tests {
                     .host,
                 "http://host2".to_owned()
             );
-            host_selector.increase_timeout_power_by("http://host2", 0);
+            host_selector
+                .increase_timeout_power_by("http://host2", 0)
+                .await;
             host_selector
                 .punish(
                     "http://host2",
@@ -890,7 +919,9 @@ mod tests {
                     &Default::default(),
                 )
                 .await;
-            host_selector.increase_timeout_power_by("http://host3", 1);
+            host_selector
+                .increase_timeout_power_by("http://host3", 1)
+                .await;
             host_selector
                 .punish(
                     "http://host3",
@@ -930,7 +961,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host2".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(200));
             }
-            host_selector.increase_timeout_power_by("http://host3", 2);
+            host_selector
+                .increase_timeout_power_by("http://host3", 2)
+                .await;
             host_selector
                 .punish(
                     "http://host3",
@@ -1020,7 +1053,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(100));
             }
-            host_selector.increase_timeout_power_by("http://host3", 2);
+            host_selector
+                .increase_timeout_power_by("http://host3", 2)
+                .await;
             host_selector
                 .punish(
                     "http://host3",
@@ -1042,7 +1077,9 @@ mod tests {
                     &Default::default(),
                 )
                 .await;
-            host_selector.increase_timeout_power_by("http://host1", 3);
+            host_selector
+                .increase_timeout_power_by("http://host1", 3)
+                .await;
             host_selector
                 .punish(
                     "http://host1",
@@ -1080,7 +1117,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(800));
             }
-            host_selector.increase_timeout_power_by("http://host3", 3);
+            host_selector
+                .increase_timeout_power_by("http://host3", 3)
+                .await;
             host_selector
                 .punish(
                     "http://host3",
@@ -1121,7 +1160,9 @@ mod tests {
                 assert_eq!(host_info.host, "http://host3".to_owned());
                 assert_eq!(host_info.timeout, Duration::from_millis(800));
             }
-            host_selector.mark_connection_as_failed("http://host2");
+            host_selector
+                .mark_connection_as_failed("http://host2")
+                .await;
             {
                 let host_info = host_selector
                     .select_host(&Default::default())

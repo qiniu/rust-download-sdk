@@ -275,23 +275,27 @@ async fn query_for_domains_without_cache(
                         format!("Unexpected status code {}", resp.status().as_u16()),
                     ))
                 } else {
-                    resp.json::<ResponseBody>()
-                        .await
-                        .tap_err(|err| {
+                    match resp.json::<ResponseBody>().await {
+                        Ok(body) => Ok(body),
+                        Err(err) => {
                             if err.is_timeout() {
-                                uc_selector.increase_timeout_power_by(
-                                    host_info.host(),
-                                    host_info.timeout_power(),
-                                );
+                                uc_selector
+                                    .increase_timeout_power_by(
+                                        host_info.host(),
+                                        host_info.timeout_power(),
+                                    )
+                                    .await;
                             }
-                        })
-                        .map_err(|err| IoError::new(IoErrorKind::BrokenPipe, err))
+                            Err(IoError::new(IoErrorKind::BrokenPipe, err))
+                        }
+                    }
                 }
             }
             Err(err) => {
                 if err.is_timeout() {
                     uc_selector
-                        .increase_timeout_power_by(host_info.host(), host_info.timeout_power());
+                        .increase_timeout_power_by(host_info.host(), host_info.timeout_power())
+                        .await;
                 }
                 Err(IoError::new(IoErrorKind::ConnectionAborted, err))
             }
@@ -496,7 +500,7 @@ mod tests {
     use super::{
         super::{
             super::{base::credential::Credential, config::Timeouts},
-            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
+            dot::{AsyncDotRecordsMap, DotRecordKey, DotRecords, DOT_FILE_NAME},
         },
         *,
     };
@@ -662,7 +666,7 @@ mod tests {
         clear_cache().await?;
 
         let uc_called = Arc::new(AtomicUsize::new(0));
-        let records_map = Arc::new(DotRecordsDashMap::default());
+        let records_map = Arc::new(AsyncDotRecordsMap::default());
 
         let uc_routes = {
             let uc_called = uc_called.to_owned();
@@ -693,14 +697,19 @@ mod tests {
                 })
         };
         let monitor_routes = {
-            let records_map = records_map.to_owned();
             path!("v1" / "stat")
                 .and(warp::header::value(AUTHORIZATION.as_str()))
                 .and(warp::body::json())
-                .map(move |authorization: HeaderValue, records: DotRecords| {
-                    assert!(authorization.to_str().unwrap().starts_with("UpToken "));
-                    records_map.merge_with_records(records);
-                    Response::new(Body::empty())
+                .then({
+                    let records_map = records_map.to_owned();
+                    move |authorization: HeaderValue, records: DotRecords| {
+                        assert!(authorization.to_str().unwrap().starts_with("UpToken "));
+                        let records_map = records_map.to_owned();
+                        async move {
+                            records_map.merge_with_records(records).await;
+                            Response::new(Body::empty())
+                        }
+                    }
                 })
         };
 
@@ -764,7 +773,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::UcV4Query))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::UcV4Query),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(3));
                 assert_eq!(record.failed_count(), Some(0));
