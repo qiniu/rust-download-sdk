@@ -312,6 +312,7 @@ impl AsyncRangeReader {
             .await
             .io_selector
             .increase_timeout_power_by(host, timeout_power)
+            .await
     }
 
     pub(super) async fn read_at<F: FnMut(HostInfo) -> Fut, Fut: Future<Output = ()>>(
@@ -1018,11 +1019,13 @@ impl AsyncRangeReader {
                 .await
                 .io_selector
                 .increase_timeout_power_by(host, timeout_power)
+                .await
         } else if err.is_connect() {
             self.inner()
                 .await
                 .io_selector
                 .mark_connection_as_failed(host)
+                .await
         }
     }
 }
@@ -1185,7 +1188,7 @@ mod tests {
     use super::{
         super::{
             cache_dir::cache_dir_path_of,
-            dot::{DotRecordKey, DotRecords, DotRecordsDashMap, DOT_FILE_NAME},
+            dot::{AsyncDotRecordsMap, DotRecordKey, DotRecords, DOT_FILE_NAME},
             query::CACHE_FILE_NAME,
         },
         *,
@@ -1230,16 +1233,19 @@ mod tests {
                     io_rx.await.unwrap();
                 },
             );
-            let $records_map = Arc::new(DotRecordsDashMap::default());
+            let $records_map = Arc::new(AsyncDotRecordsMap::default());
             let monitor_routes = {
                 let records_map = $records_map.to_owned();
                 path!("v1" / "stat")
                     .and(warp::header::value(AUTHORIZATION.as_str()))
                     .and(warp::body::json())
-                    .map(move |authorization: HeaderValue, records: DotRecords| {
+                    .then(move |authorization: HeaderValue, records: DotRecords| {
                         assert!(authorization.to_str().unwrap().starts_with("UpToken "));
-                        records_map.merge_with_records(records);
-                        Response::new(Body::empty())
+                        let records_map = records_map.to_owned();
+                        async move {
+                            records_map.merge_with_records(records).await;
+                            Response::new(Body::empty())
+                        }
                     })
             };
             let ($monitor_addr, monitor_server) = warp::serve(monitor_routes)
@@ -1393,7 +1399,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(2));
                 assert_eq!(record.failed_count(), Some(0));
@@ -1458,7 +1468,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(0));
                 assert_eq!(record.failed_count(), Some(3));
@@ -1523,7 +1537,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(0));
                 assert_eq!(record.failed_count(), Some(1));
@@ -1589,7 +1607,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(1));
                 assert_eq!(record.failed_count(), Some(0));
@@ -1675,7 +1697,11 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(3));
                 assert_eq!(record.failed_count(), Some(0));
@@ -1767,13 +1793,20 @@ mod tests {
             sleep(Duration::from_secs(5)).await;
             {
                 let record = records_map
-                    .get(&DotRecordKey::new(DotType::Http, ApiName::IoGetfile))
+                    .read_async(
+                        &DotRecordKey::new(DotType::Http, ApiName::IoGetfile),
+                        |_, record| record.to_owned(),
+                    )
+                    .await
                     .unwrap();
                 assert_eq!(record.success_count(), Some(0));
                 assert_eq!(record.failed_count(), Some(9));
             }
             {
-                let record = records_map.get(&DotRecordKey::punished()).unwrap();
+                let record = records_map
+                    .read_async(&DotRecordKey::punished(), |_, record| record.to_owned())
+                    .await
+                    .unwrap();
                 assert_eq!(record.punished_count(), Some(4));
             }
         });
