@@ -101,6 +101,19 @@ struct CacheValue {
     cache_deadline: SystemTime,
 }
 
+impl CacheValue {
+    fn new(cached_response_body: ResponseBody, cache_lifetime: Duration) -> Self {
+        Self {
+            cached_response_body,
+            cache_deadline: SystemTime::now() + cache_lifetime,
+        }
+    }
+
+    fn is_expired(&self) -> bool {
+        self.cache_deadline < SystemTime::now()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ResponseBody {
     hosts: Vec<RegionResponseBody>,
@@ -190,7 +203,7 @@ impl HostsQuerier {
                 result
             })?;
 
-        if cache_value.cache_deadline < SystemTime::now() {
+        if cache_value.is_expired() {
             let ak = ak.to_owned();
             let bucket = bucket.to_owned();
             let uc_selector = self.uc_selector.to_owned();
@@ -200,7 +213,7 @@ impl HostsQuerier {
             spawn(move || {
                 let mut modified = false;
                 CACHE_MAP.entry(cache_key).and_modify(|cache_value| {
-                    if cache_value.cache_deadline < SystemTime::now() {
+                    if cache_value.is_expired() {
                         if let Ok(new_cache_value) = query_for_domains_without_cache(
                             ak,
                             bucket,
@@ -301,16 +314,14 @@ fn query_for_domains_without_cache(
                         .map(|host| host.ttl)
                         .min()
                         .expect("No host in uc query v4 response body");
-                    CacheValue {
-                        cached_response_body: body,
-                        cache_deadline: SystemTime::now() + Duration::from_secs(min_ttl),
-                    }
+                    CacheValue::new(body, Duration::from_secs(min_ttl))
                 })
                 .tap_ok(|_| {
                     info!(
-                        "update query cache for ak = {}, bucket = {} is successful",
+                        "update query cache for ak = {}, bucket = {} is successful (uc_hosts_crc32 = {})",
                         ak.as_ref(),
                         bucket.as_ref(),
+                        uc_selector.all_hosts_crc32(),
                     );
                 })
                 .tap_err(|err| {
@@ -376,7 +387,9 @@ fn load_cache() -> IOResult<()> {
                 .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
             CACHE_MAP.clear();
             for (key, value) in cache.into_iter() {
-                CACHE_MAP.insert(key, value);
+                if !value.is_expired() {
+                    CACHE_MAP.insert(key, value);
+                }
             }
         }
         Err(err) => {
@@ -425,7 +438,17 @@ fn save_cache() -> IOResult<()> {
             .create(true)
             .truncate(true)
             .open(cache_file_path)?;
-        json_to_writer(&mut cache_file, &*CACHE_MAP)
+        let to_save: HashMap<_, _> = CACHE_MAP
+            .iter()
+            .filter_map(|cache_entry| {
+                if cache_entry.is_expired() {
+                    None
+                } else {
+                    Some((cache_entry.key().to_owned(), cache_entry.value().to_owned()))
+                }
+            })
+            .collect();
+        json_to_writer(&mut cache_file, &to_save)
             .map_err(|err| IOError::new(IOErrorKind::Other, err))?;
         Ok(())
     }
@@ -486,6 +509,19 @@ mod tests {
     };
 
     macro_rules! starts_with_server {
+        ($uc_addr:ident, $uc_routes:ident, $code:block) => {{
+            let (tx, rx) = channel();
+            let ($uc_addr, server) = warp::serve($uc_routes).bind_with_graceful_shutdown(
+                ([127, 0, 0, 1], 0),
+                async move {
+                    rx.await.ok();
+                },
+            );
+            let handler = spawn(server);
+            $code;
+            tx.send(()).ok();
+            handler.await.ok();
+        }};
         ($uc_addr:ident, $monitor_addr:ident, $uc_routes:ident, $monitor_routes:ident, $code:block) => {{
             let (uc_tx, uc_rx) = channel();
             let (monitor_tx, monitor_rx) = channel();
@@ -714,6 +750,71 @@ mod tests {
                     assert_eq!(record.success_count(), Some(2));
                     assert_eq!(record.failed_count(), Some(0));
                 }
+
+                Ok(())
+            })
+            .await??;
+        });
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_uc_query_v4_with_dynamic_uc_addr() -> Result<(), Box<dyn Error>> {
+        env_logger::try_init().ok();
+
+        CACHE_MAP.clear();
+        clear_cache()?;
+
+        let uc_called = Arc::new(AtomicUsize::new(0));
+        let uc_routes = {
+            let uc_called = uc_called.to_owned();
+            path!("v4" / "query")
+                .and(warp::query::<UcQueryParams>())
+                .map(move |params: UcQueryParams| {
+                    uc_called.fetch_add(1, Relaxed);
+                    assert_eq!(&params.ak, ACCESS_KEY);
+                    assert_eq!(&params.bucket, BUCKET_NAME);
+                    Response::new(
+                        json!({
+                            "hosts": [{
+                                "region": "z0",
+                                "ttl":1,
+                                "io": {
+                                  "domains": [
+                                    "iovip.qbox.me"
+                                  ]
+                                },
+                                "uc": {
+                                  "domains": ["uc.qbox.me"]
+                                }
+                            }]
+                        })
+                        .to_string()
+                        .into(),
+                    )
+                })
+        };
+        starts_with_server!(uc_addr, uc_routes, {
+            spawn_blocking(move || -> IOResult<()> {
+                let dotter = Dotter::default();
+                let host_selector =
+                    HostSelector::builder(vec!["http://".to_owned() + &uc_addr.to_string()])
+                        .build();
+                let hosts_querier =
+                    HostsQuerier::new(host_selector, 1, dotter, Timeouts::default_http_client());
+                let io_urls =
+                    hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
+                assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
+                assert_eq!(uc_called.load(Relaxed), 1);
+
+                assert_eq!(CACHE_MAP.len(), 1);
+
+                sleep(Duration::from_secs(2));
+
+                CACHE_MAP.clear();
+                load_cache()?;
+
+                assert!(CACHE_MAP.is_empty());
 
                 Ok(())
             })

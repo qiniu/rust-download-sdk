@@ -45,7 +45,7 @@ struct PunishedInfo {
     failed_to_connect: bool,
 }
 
-impl<'a> Ord for PunishedInfo {
+impl Ord for PunishedInfo {
     fn cmp(&self, other: &Self) -> Ordering {
         if self.failed_to_connect != other.failed_to_connect {
             return self.failed_to_connect.cmp(&other.failed_to_connect);
@@ -62,7 +62,7 @@ impl<'a> Ord for PunishedInfo {
     }
 }
 
-impl<'a> PartialOrd for PunishedInfo {
+impl PartialOrd for PunishedInfo {
     #[inline]
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
