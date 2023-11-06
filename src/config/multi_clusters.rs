@@ -90,10 +90,7 @@ impl MultipleClustersConfig {
     }
 
     pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
-        self.configs
-            .iter()
-            .map(|(_, config)| Timeouts::from(config))
-            .collect()
+        self.configs.values().map(Timeouts::from).collect()
     }
 }
 
