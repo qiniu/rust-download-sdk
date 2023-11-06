@@ -119,7 +119,7 @@ impl Dotter {
                     .create(true)
                     .write(true)
                     .append(true)
-                    .open(&buffered_file_path)
+                    .open(buffered_file_path)
                 {
                     let monitor_selector = HostSelector::builder(monitor_urls)
                         .punish_duration(punish_duration.unwrap_or_else(|| Duration::from_secs(30)))
@@ -277,7 +277,7 @@ impl DotterInner {
         let mut buffered_file = OpenOptions::new()
             .read(true)
             .write(true)
-            .open(&cache_dir_path_of(DOT_FILE_NAME)?)?;
+            .open(cache_dir_path_of(DOT_FILE_NAME)?)?;
         self.upload_with_retry(|monitor_host, timeout, timeout_power| {
             let url = format!("{}/v1/stat", monitor_host);
             debug!("try to upload dots to {}", url);
@@ -647,7 +647,7 @@ impl DotRecordsMap {
     #[allow(dead_code)]
     pub(super) fn into_records(self) -> DotRecords {
         DotRecords {
-            records: self.m.into_iter().map(|(_, v)| v).collect(),
+            records: self.m.into_values().collect(),
         }
     }
 }

@@ -177,8 +177,10 @@ impl HostsUpdater {
         for host in hosts.iter() {
             new_hosts_set.insert(host.to_owned());
             self.hosts_map
-                .upsert_async(host.to_owned(), Default::default, |_, _| {})
-                .await;
+                .entry_async(host.to_owned())
+                .await
+                .and_modify(|v| *v = Default::default())
+                .or_default();
         }
         self.hosts_map
             .retain_async(|host, _| new_hosts_set.contains(host))
