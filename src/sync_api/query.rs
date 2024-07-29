@@ -252,7 +252,7 @@ fn query_for_domains_without_cache(
             })?;
 
             http_client
-                .get(&url.to_string())
+                .get(url.to_string())
                 .timeout(timeout)
                 .send()
                 .tap_err(|err| {

@@ -24,7 +24,6 @@ use std::{
         Arc,
     },
     time::{Duration, Instant, SystemTime},
-    u128,
 };
 use tap::prelude::*;
 use tokio::{
@@ -759,7 +758,7 @@ impl DotRecordsMap {
     #[allow(dead_code)]
     pub(super) fn into_records(self) -> DotRecords {
         DotRecords {
-            records: self.0.into_iter().map(|(_, v)| v).collect(),
+            records: self.0.into_values().collect(),
         }
     }
 }
@@ -779,37 +778,35 @@ impl AsyncDotRecordsMap {
     #[allow(dead_code)]
     pub(super) async fn merge_with_record(&self, record: DotRecord) {
         self.0
-            .upsert_async(
-                record.key(),
-                || record.to_owned(),
-                |_, mut r| match (&mut r, &record) {
-                    (DotRecord::APICalls(r), DotRecord::APICalls(record)) => {
-                        let success_elapsed_duration_total = r.success_avg_elapsed_duration
-                            * to_u128(r.success_count)
-                            + record.success_avg_elapsed_duration * to_u128(record.success_count);
-                        let failed_elapsed_duration_total = r.failed_avg_elapsed_duration
-                            * to_u128(r.failed_count)
-                            + record.failed_avg_elapsed_duration * to_u128(record.failed_count);
-                        r.success_count += record.success_count;
-                        r.failed_count += record.failed_count;
-                        r.success_avg_elapsed_duration = if r.success_count > 0 {
-                            success_elapsed_duration_total / to_u128(r.success_count)
-                        } else {
-                            0
-                        };
-                        r.failed_avg_elapsed_duration = if r.failed_count > 0 {
-                            failed_elapsed_duration_total / to_u128(r.failed_count)
-                        } else {
-                            0
-                        };
-                    }
-                    (DotRecord::PunishedCount(r), DotRecord::PunishedCount(record)) => {
-                        r.punished_count += record.punished_count;
-                    }
-                    _ => panic!("Impossible merge with {:?} and {:?}", r, record),
-                },
-            )
-            .await;
+            .entry_async(record.key())
+            .await
+            .and_modify(|mut r| match (&mut r, &record) {
+                (DotRecord::APICalls(r), DotRecord::APICalls(record)) => {
+                    let success_elapsed_duration_total = r.success_avg_elapsed_duration
+                        * to_u128(r.success_count)
+                        + record.success_avg_elapsed_duration * to_u128(record.success_count);
+                    let failed_elapsed_duration_total = r.failed_avg_elapsed_duration
+                        * to_u128(r.failed_count)
+                        + record.failed_avg_elapsed_duration * to_u128(record.failed_count);
+                    r.success_count += record.success_count;
+                    r.failed_count += record.failed_count;
+                    r.success_avg_elapsed_duration = if r.success_count > 0 {
+                        success_elapsed_duration_total / to_u128(r.success_count)
+                    } else {
+                        0
+                    };
+                    r.failed_avg_elapsed_duration = if r.failed_count > 0 {
+                        failed_elapsed_duration_total / to_u128(r.failed_count)
+                    } else {
+                        0
+                    };
+                }
+                (DotRecord::PunishedCount(r), DotRecord::PunishedCount(record)) => {
+                    r.punished_count += record.punished_count;
+                }
+                _ => panic!("Impossible merge with {:?} and {:?}", r, record),
+            })
+            .or_insert_with(|| record.to_owned());
 
         fn to_u128(v: usize) -> u128 {
             u128::try_from(v).unwrap_or(u128::MAX)
@@ -827,7 +824,7 @@ impl AsyncDotRecordsMap {
     pub(super) async fn into_records(self) -> DotRecords {
         let mut records = Vec::new();
         self.0
-            .for_each_async(|_, record| {
+            .scan_async(|_, record| {
                 records.push(record.to_owned());
             })
             .await;

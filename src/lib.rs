@@ -8,13 +8,11 @@
     macro_use_extern_crate,
     meta_variable_misuse,
     non_ascii_idents,
-    indirect_structural_match,
     trivial_casts,
     trivial_numeric_casts,
     unused_crate_dependencies,
     unused_extern_crates,
     unused_import_braces,
-    // unused_lifetimes,
     unused_qualifications
 )]
 
