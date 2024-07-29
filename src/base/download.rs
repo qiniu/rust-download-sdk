@@ -105,14 +105,10 @@ impl RangeReaderBuilder {
         self
     }
 
-    ///
-
     pub(crate) fn max_punished_times(mut self, max_times: usize) -> Self {
         self.max_punished_times = Some(max_times);
         self
     }
-
-    ///
 
     pub(crate) fn max_punished_hosts_percent(mut self, percent: u8) -> Self {
         self.max_punished_hosts_percent = Some(percent);

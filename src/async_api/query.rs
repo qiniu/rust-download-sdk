@@ -263,7 +263,7 @@ async fn query_for_domains_without_cache(
         })?;
 
         let body_result = match http_client
-            .get(&url.to_string())
+            .get(url.to_string())
             .timeout(host_info.timeout())
             .send()
             .await
