@@ -270,7 +270,7 @@ fn query_for_domains_without_cache(
             })?;
 
             http_client
-                .get(&url.to_string())
+                .get(url.to_string())
                 .timeout(timeout)
                 .send()
                 .tap_err(|err| {
@@ -802,8 +802,7 @@ mod tests {
                         .build();
                 let hosts_querier =
                     HostsQuerier::new(host_selector, 1, dotter, Timeouts::default_http_client());
-                let io_urls =
-                    hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
+                let io_urls = hosts_querier.query_for_io_urls(ACCESS_KEY, BUCKET_NAME, false)?;
                 assert_eq!(io_urls, vec!["http://iovip.qbox.me".to_owned()]);
                 assert_eq!(uc_called.load(Relaxed), 1);
 

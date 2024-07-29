@@ -213,6 +213,12 @@ pub(super) fn build_range_reader_builder_from_config(
         }
     }
 
+    if let Some(connect_timeout) = config.connect_timeout() {
+        if connect_timeout > Duration::from_millis(0) {
+            builder = builder.connect_timeout(connect_timeout);
+        }
+    }
+
     if let Some(dot_interval) = config.dot_interval() {
         if dot_interval > Duration::from_secs(0) {
             builder = builder.dot_interval(dot_interval);
