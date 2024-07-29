@@ -1,7 +1,4 @@
-use std::{
-    time::{SystemTime, UNIX_EPOCH},
-    u64,
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value as JSONValue};
 

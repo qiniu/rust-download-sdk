@@ -1,8 +1,12 @@
 [package]
 name = "qiniu-download"
-version = "1.0.15"
+version = "1.0.16"
 description = "Qiniu Resource (Cloud) Download SDK for Rust."
-authors = ["Bachue Zhou <zhourong@qiniu.com>", "longbai <baishunlong@qiniu.com>", "qiniusdk <sdk@qiniu.com>"]
+authors = [
+    "Bachue Zhou <zhourong@qiniu.com>",
+    "longbai <baishunlong@qiniu.com>",
+    "qiniusdk <sdk@qiniu.com>",
+]
 documentation = "https://docs.rs/qiniu-download"
 repository = "https://github.com/qiniu/rust-download-sdk"
 readme = "README.md"
@@ -19,7 +23,10 @@ reqwest = { version = "0.11.3", features = ["blocking", "json"] }
 once_cell = "1.7.2"
 positioned-io = "0.2.2"
 rand = "0.8.3"
-multipart = { version = "=0.17.3", package = "qiniu-multipart", default-features = false, features = ["client", "server"] }
+multipart = { version = "=0.17.3", package = "qiniu-multipart", default-features = false, features = [
+    "client",
+    "server",
+] }
 text_io = "0.1.8"
 dashmap = { version = "4.0.2", features = ["serde"] }
 serde = { version = "1.0.126", features = ["derive"] }
@@ -32,8 +39,17 @@ notify = "4.0.17"
 fd-lock = "2.0.0"
 anyhow = "1.0.40"
 thiserror = "1.0.30"
-hyper = { version = "0.14.9", default-features = false, features = ["tcp", "http1", "http2", "client", "runtime"] }
-tokio = { version = "1.6.1", default-features = false, features = ["net", "time"] }
+hyper = { version = "0.14.9", default-features = false, features = [
+    "tcp",
+    "http1",
+    "http2",
+    "client",
+    "runtime",
+] }
+tokio = { version = "1.6.1", default-features = false, features = [
+    "net",
+    "time",
+] }
 crc32fast = "1.2.1"
 
 [dev-dependencies]

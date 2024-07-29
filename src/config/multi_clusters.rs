@@ -85,8 +85,8 @@ impl MultipleClustersConfig {
             .unwrap_or_default();
         paths.extend(
             self.configs
-                .iter()
-                .filter_map(|(_, config)| config.original_path())
+                .values()
+                .filter_map(|config| config.original_path())
                 .map(|path| path.to_owned()),
         );
         paths
@@ -94,10 +94,7 @@ impl MultipleClustersConfig {
 
     #[inline]
     pub(super) fn timeouts_set(&self) -> HashSet<Timeouts> {
-        self.configs
-            .iter()
-            .map(|(_, config)| Timeouts::from(config))
-            .collect()
+        self.configs.values().map(Timeouts::from).collect()
     }
 }
 

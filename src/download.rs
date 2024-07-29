@@ -928,7 +928,7 @@ impl RangeReader {
                         }
                     });
                 let origin_start_from = start_from;
-                start_from = writer.seek(SeekFrom::Current(0))?;
+                start_from = writer.stream_position()?;
                 result
                     .map(|_| start_from - init_start_from)
                     .tap_ok(|_| {
