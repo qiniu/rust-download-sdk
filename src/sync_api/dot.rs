@@ -1184,7 +1184,7 @@ mod tests {
 
     fn clear_cache() -> IOResult<()> {
         let cache_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
-        std::fs::remove_file(&cache_file_path).or_else(|err| {
+        std::fs::remove_file(cache_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
             } else {

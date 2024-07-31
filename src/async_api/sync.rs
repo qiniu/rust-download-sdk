@@ -697,8 +697,8 @@ mod tests {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(&parts.get(1).unwrap().data, b"12345");
                 assert_eq!(parts.get(1).unwrap().range, (0, 5));
-                assert_eq!(&parts.get(0).unwrap().data, b"67890");
-                assert_eq!(parts.get(0).unwrap().range, (5, 5));
+                assert_eq!(&parts.first().unwrap().data, b"67890");
+                assert_eq!(parts.first().unwrap().range, (5, 5));
             })
             .await?;
         });

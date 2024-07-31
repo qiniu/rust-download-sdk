@@ -2038,8 +2038,8 @@ mod tests {
                     assert_eq!(parts.len(), 2);
                     assert_eq!(&parts.get(1).unwrap().data, b"12345");
                     assert_eq!(parts.get(1).unwrap().range, (0, 5));
-                    assert_eq!(&parts.get(0).unwrap().data, b"67890");
-                    assert_eq!(parts.get(0).unwrap().range, (5, 5));
+                    assert_eq!(&parts.first().unwrap().data, b"67890");
+                    assert_eq!(parts.first().unwrap().range, (5, 5));
                 }
                 _ => unreachable!(),
             }
@@ -2090,8 +2090,8 @@ mod tests {
             {
                 Result3::Ok(parts) => {
                     assert_eq!(parts.len(), 2);
-                    assert_eq!(&parts.get(0).unwrap().data, b"12345");
-                    assert_eq!(parts.get(0).unwrap().range, (0, 5));
+                    assert_eq!(&parts.first().unwrap().data, b"12345");
+                    assert_eq!(parts.first().unwrap().range, (0, 5));
                     assert_eq!(&parts.get(1).unwrap().data, b"67890");
                     assert_eq!(parts.get(1).unwrap().range, (5, 5));
                 }
@@ -2266,8 +2266,8 @@ mod tests {
                     assert_eq!(parts.len(), 2);
                     assert_eq!(&parts.get(1).unwrap().data, b"12345");
                     assert_eq!(parts.get(1).unwrap().range, (0, 5));
-                    assert_eq!(&parts.get(0).unwrap().data, b"6");
-                    assert_eq!(parts.get(0).unwrap().range, (5, 1));
+                    assert_eq!(&parts.first().unwrap().data, b"6");
+                    assert_eq!(parts.first().unwrap().range, (5, 1));
                 }
                 _ => unreachable!(),
             }
@@ -2319,8 +2319,8 @@ mod tests {
             {
                 IoResult3::Ok(parts) => {
                     assert_eq!(parts.len(), 1);
-                    assert_eq!(&parts.get(0).unwrap().data, b"1234");
-                    assert_eq!(parts.get(0).unwrap().range, (0, 4));
+                    assert_eq!(&parts.first().unwrap().data, b"1234");
+                    assert_eq!(parts.first().unwrap().range, (0, 4));
                 }
                 _ => unreachable!(),
             }
@@ -2376,8 +2376,8 @@ mod tests {
             {
                 Result3::Ok(parts) => {
                     assert_eq!(parts.len(), 1);
-                    assert_eq!(&parts.get(0).unwrap().data, b"123");
-                    assert_eq!(parts.get(0).unwrap().range, (0, 3));
+                    assert_eq!(&parts.first().unwrap().data, b"123");
+                    assert_eq!(parts.first().unwrap().range, (0, 3));
                 }
                 _ => unreachable!(),
             }

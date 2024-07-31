@@ -208,6 +208,12 @@ pub(super) fn build_range_reader_builder_from_config(
         }
     }
 
+    if let Some(connect_timeout) = config.connect_timeout() {
+        if connect_timeout > Duration::from_millis(0) {
+            builder = builder.connect_timeout(connect_timeout);
+        }
+    }
+
     if let Some(dot_interval) = config.dot_interval() {
         if dot_interval > Duration::from_secs(0) {
             builder = builder.dot_interval(dot_interval);
@@ -326,6 +332,7 @@ mod tests {
             let mut tempfile = OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&tempfile_path)?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
@@ -353,6 +360,7 @@ mod tests {
             let mut tempfile = OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&new_tempfile_path)?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
@@ -381,6 +389,7 @@ mod tests {
             let mut tempfile = OpenOptions::new()
                 .write(true)
                 .create(true)
+                .truncate(true)
                 .open(&new_tempfile_path)?;
             tempfile.write_all(&toml::to_vec(&config)?)?;
             tempfile.flush()?;
@@ -540,7 +549,7 @@ mod tests {
                 Some(vec!["http://io-21.com".into(), "http://io-22.com".into()]),
             )
             .build();
-            fs::write(&tempfile_path_2, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path_2, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
@@ -586,7 +595,7 @@ mod tests {
             config.insert("config_1", tempfile_path_1.to_path_buf());
             config.insert("config_2", tempfile_path_2.to_path_buf());
             config.insert("config_3", tempfile_path_3.to_path_buf());
-            fs::write(&tempfile_path, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path, toml::to_vec(&config)?)?;
         };
 
         sleep(Duration::from_secs(1));
@@ -619,7 +628,7 @@ mod tests {
                 Some(vec!["http://io-31.com".into(), "http://io-32.com".into()]),
             )
             .build();
-            fs::write(&tempfile_path_3, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path_3, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
@@ -650,7 +659,7 @@ mod tests {
             let mut config = HashMap::with_capacity(2);
             config.insert("config_2", tempfile_path_2.to_path_buf());
             config.insert("config_3", tempfile_path_3.to_path_buf());
-            fs::write(&tempfile_path, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
@@ -682,7 +691,7 @@ mod tests {
                 Some(vec!["http://io-11.com".into(), "http://io-12.com".into()]),
             )
             .build();
-            fs::write(&tempfile_path_1, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path_1, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
@@ -693,7 +702,7 @@ mod tests {
         {
             fs::write(
                 &tempfile_path,
-                &toml::to_vec(&HashMap::<String, PathBuf>::new())?,
+                toml::to_vec(&HashMap::<String, PathBuf>::new())?,
             )?;
         };
 
@@ -980,7 +989,7 @@ mod tests {
             )
             .max_retry_concurrency(Some(0))
             .build();
-            fs::write(&tempfile_path_1, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path_1, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
@@ -1008,7 +1017,7 @@ mod tests {
         {
             let mut config = HashMap::with_capacity(2);
             config.insert("/node1", tempfile_path_1.to_path_buf());
-            fs::write(&tempfile_path, &toml::to_vec(&config)?)?;
+            fs::write(&tempfile_path, toml::to_vec(&config)?)?;
         }
 
         sleep(Duration::from_secs(1));
