@@ -1621,8 +1621,8 @@ mod tests {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(&parts.get(1).unwrap().data, b"12345");
                 assert_eq!(parts.get(1).unwrap().range, (0, 5));
-                assert_eq!(&parts.get(0).unwrap().data, b"67890");
-                assert_eq!(parts.get(0).unwrap().range, (5, 5));
+                assert_eq!(&parts.first().unwrap().data, b"67890");
+                assert_eq!(parts.first().unwrap().range, (5, 5));
             })
             .await?;
         });
@@ -1659,8 +1659,8 @@ mod tests {
                 let ranges = [(0, 5), (5, 5)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 2);
-                assert_eq!(&parts.get(0).unwrap().data, b"12345");
-                assert_eq!(parts.get(0).unwrap().range, (0, 5));
+                assert_eq!(&parts.first().unwrap().data, b"12345");
+                assert_eq!(parts.first().unwrap().range, (0, 5));
                 assert_eq!(&parts.get(1).unwrap().data, b"67890");
                 assert_eq!(parts.get(1).unwrap().range, (5, 5));
             })
@@ -1790,8 +1790,8 @@ mod tests {
                 assert_eq!(parts.len(), 2);
                 assert_eq!(&parts.get(1).unwrap().data, b"12345");
                 assert_eq!(parts.get(1).unwrap().range, (0, 5));
-                assert_eq!(&parts.get(0).unwrap().data, b"6");
-                assert_eq!(parts.get(0).unwrap().range, (5, 1));
+                assert_eq!(&parts.first().unwrap().data, b"6");
+                assert_eq!(parts.first().unwrap().range, (5, 1));
             })
             .await?;
         });
@@ -1828,8 +1828,8 @@ mod tests {
                 let ranges = [(0, 5), (5, 1)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 1);
-                assert_eq!(&parts.get(0).unwrap().data, b"1234");
-                assert_eq!(parts.get(0).unwrap().range, (0, 4));
+                assert_eq!(&parts.first().unwrap().data, b"1234");
+                assert_eq!(parts.first().unwrap().range, (0, 4));
             })
             .await?;
         });
@@ -1869,8 +1869,8 @@ mod tests {
                 let ranges = [(0, 4)];
                 let parts = downloader.read_multi_ranges(&ranges).unwrap();
                 assert_eq!(parts.len(), 1);
-                assert_eq!(&parts.get(0).unwrap().data, b"123");
-                assert_eq!(parts.get(0).unwrap().range, (0, 3));
+                assert_eq!(&parts.first().unwrap().data, b"123");
+                assert_eq!(parts.first().unwrap().range, (0, 3));
             })
             .await?;
         });
@@ -1911,7 +1911,7 @@ mod tests {
 
     fn clear_cache() -> IOResult<()> {
         let cache_file_path = cache_dir_path_of("query-cache.json")?;
-        remove_file(&cache_file_path).or_else(|err| {
+        remove_file(cache_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
             } else {
@@ -1919,7 +1919,7 @@ mod tests {
             }
         })?;
         let dot_file_path = cache_dir_path_of(DOT_FILE_NAME)?;
-        remove_file(&dot_file_path).or_else(|err| {
+        remove_file(dot_file_path).or_else(|err| {
             if err.kind() == IOErrorKind::NotFound {
                 Ok(())
             } else {

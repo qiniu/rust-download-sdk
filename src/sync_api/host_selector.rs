@@ -1075,7 +1075,7 @@ mod tests {
 
         spawn_blocking(move || {
             let response = Client::new()
-                .get(&format!("http://{}/file", addr))
+                .get(format!("http://{}/file", addr))
                 .timeout(Duration::from_millis(100))
                 .send()
                 .unwrap();
